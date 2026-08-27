@@ -5,14 +5,17 @@ import {
   Map as MapIcon, MapPin, Menu, Navigation, Plus, Search, SlidersHorizontal,
   Sparkles, Star, X,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 type PlaceStatus = 'open' | 'soon' | 'closed';
 type Place = {
   id: string; placeId: string; name: string; category: string; address: string;
   hours: string; status: PlaceStatus; statusLabel: string; distance: string;
   note: string; photo: string; x: number; y: number; rating: string; destination?: string;
+  lat?: number; lng?: number; photoAttribution?: { name: string; url: string };
 };
+
+type MapsStatus = 'loading' | 'ready' | 'needs-key' | 'error';
 
 const initialPlaces: Place[] = [
   {
@@ -21,7 +24,7 @@ const initialPlaces: Place[] = [
     hours: '10:00 – 19:00', status: 'open', statusLabel: 'Aberto agora', distance: '1,2 km',
     note: 'Comprar ingresso antecipado',
     photo: 'https://images.unsplash.com/photo-1539037116277-4db20889f2d4?auto=format&fit=crop&w=1200&q=85',
-    x: 25, y: 34, rating: '4,7',
+    x: 25, y: 34, rating: '4,7', lat: 40.417955, lng: -3.714312,
   },
   {
     id: 'prado', placeId: 'ChIJ7aLYZp0oQg0RWoitk33wlBA', name: 'Museu do Prado',
@@ -29,7 +32,7 @@ const initialPlaces: Place[] = [
     hours: '10:00 – 20:00', status: 'soon', statusLabel: 'Fecha em 45 min', distance: '850 m',
     note: 'Ver a ala de Goya primeiro',
     photo: 'https://images.unsplash.com/photo-1543783207-ec64e4d95325?auto=format&fit=crop&w=1200&q=85',
-    x: 64, y: 49, rating: '4,8',
+    x: 64, y: 49, rating: '4,8', lat: 40.413782, lng: -3.692127,
   },
   {
     id: 'retiro', placeId: 'ChIJv_4a4ZYoQg0R2DJ8JCQx3jk', name: 'Parque El Retiro',
@@ -37,7 +40,7 @@ const initialPlaces: Place[] = [
     hours: '06:00 – 00:00', status: 'open', statusLabel: 'Aberto agora', distance: '1,6 km',
     note: 'Alugar um barco no lago',
     photo: 'https://images.unsplash.com/photo-1548919973-5cef591cdbc9?auto=format&fit=crop&w=1200&q=85',
-    x: 78, y: 29, rating: '4,8',
+    x: 78, y: 29, rating: '4,8', lat: 40.41526, lng: -3.68454,
   },
   {
     id: 'botin', placeId: 'ChIJW7dQGYYoQg0Rql2PUtWg3xw', name: 'Sobrino de Botín',
@@ -45,28 +48,11 @@ const initialPlaces: Place[] = [
     hours: '13:00 – 16:00, 20:00 – 00:00', status: 'closed', statusLabel: 'Abre às 20:00', distance: '950 m',
     note: 'Pedir o cochinillo assado',
     photo: 'https://images.unsplash.com/photo-1515443961218-a51367888e4b?auto=format&fit=crop&w=1200&q=85',
-    x: 39, y: 68, rating: '4,3',
+    x: 39, y: 68, rating: '4,3', lat: 40.414236, lng: -3.708073,
   },
 ];
 
 const statusCopy: Record<PlaceStatus, string> = { open: 'Aberto', soon: 'Em breve', closed: 'Fechado' };
-
-const suggestedPlaces: Place[] = [
-  {
-    id: 'mercado', placeId: 'ChIJX4HLK4YoQg0R9RLBjE2zfok', name: 'Mercado de San Miguel',
-    category: 'Gastronomia', address: 'Pl. de San Miguel, s/n, Centro, Madrid',
-    hours: '10:00 – 00:00', status: 'open', statusLabel: 'Aberto agora', distance: '1,1 km',
-    note: '', photo: 'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=1200&q=85',
-    x: 32, y: 57, rating: '4,4',
-  },
-  {
-    id: 'reina-sofia', placeId: 'ChIJG4DOU3woQg0RG3f4hq0Z6UA', name: 'Museu Reina Sofía',
-    category: 'Museu', address: 'C. de Sta. Isabel, 52, Centro, Madrid',
-    hours: '10:00 – 21:00', status: 'soon', statusLabel: 'Fecha em 1 h', distance: '1,4 km',
-    note: '', photo: 'https://images.unsplash.com/photo-1564399579883-451a5d44ec08?auto=format&fit=crop&w=1200&q=85',
-    x: 61, y: 72, rating: '4,5',
-  },
-];
 
 export default function Home() {
   const [places, setPlaces] = useState(initialPlaces);
@@ -84,23 +70,113 @@ export default function Home() {
   const [locationLabel, setLocationLabel] = useState('Sua localização');
   const [toast, setToast] = useState('');
   const [zoom, setZoom] = useState(1);
+  const [mapsStatus, setMapsStatus] = useState<MapsStatus>('loading');
+  const [mapsError, setMapsError] = useState('');
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [predictions, setPredictions] = useState<google.maps.places.PlacePrediction[]>([]);
+  const [isSearchingGoogle, setIsSearchingGoogle] = useState(false);
+  const [liveMap, setLiveMap] = useState<google.maps.Map | null>(null);
+  const [userPosition, setUserPosition] = useState<google.maps.LatLngLiteral | null>(null);
+  const sessionTokenRef = useRef<google.maps.places.AutocompleteSessionToken | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const savedNotes = localStorage.getItem('roamly-notes');
-    if (!savedNotes) return;
     try {
-      const notes = JSON.parse(savedNotes) as Record<string, string>;
-      setPlaces((current) => current.map((place) => ({ ...place, note: notes[place.id] ?? place.note })));
+      const notes = savedNotes ? JSON.parse(savedNotes) as Record<string, string> : {};
+      const savedMaps = JSON.parse(localStorage.getItem('roamly-maps') ?? '[]') as string[];
+      const savedRefs = JSON.parse(localStorage.getItem('roamly-place-refs') ?? '[]') as Array<{ id: string; placeId: string; destination: string; note?: string }>;
+      if (savedMaps.length) setMaps((current) => Array.from(new Set([...current, ...savedMaps])));
+      setPlaces((current) => {
+        const hydrated = current.map((place) => ({ ...place, note: notes[place.id] ?? place.note }));
+        const known = new Set(hydrated.map((place) => `${place.placeId}:${place.destination ?? 'Madri'}`));
+        const restored = savedRefs.filter((ref) => !known.has(`${ref.placeId}:${ref.destination}`)).map((ref, index) => ({
+          id: ref.id, placeId: ref.placeId, destination: ref.destination, note: ref.note ?? '',
+          name: 'Carregando lugar…', category: 'Google Places', address: '', hours: 'Consultando horários',
+          status: 'closed' as PlaceStatus, statusLabel: 'Atualizando', distance: '—', photo: '',
+          x: 45 + index * 4, y: 45 + index * 3, rating: '—',
+        }));
+        return [...hydrated, ...restored];
+      });
     } catch { /* Keep curated defaults if local data is invalid. */ }
   }, []);
 
+  useEffect(() => {
+    localStorage.setItem('roamly-maps', JSON.stringify(maps));
+    localStorage.setItem('roamly-place-refs', JSON.stringify(places.map((place) => ({ id: place.id, placeId: place.placeId, destination: place.destination ?? 'Madri', note: place.note }))));
+  }, [maps, places]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/google-config').then(async (response) => await response.json() as { apiKey?: string }).catch(() => ({ apiKey: '' })).then((config) => {
+      if (cancelled) return;
+      setApiKey(config.apiKey || localStorage.getItem('roamly-google-maps-key') || '');
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (apiKey === null) return;
+    if (!apiKey) { setMapsStatus('needs-key'); return; }
+    let cancelled = false;
+    setMapsStatus('loading'); setMapsError('');
+    loadGoogleMaps(apiKey).then(async () => {
+      await Promise.all([google.maps.importLibrary('maps'), google.maps.importLibrary('places'), google.maps.importLibrary('marker')]);
+      if (!cancelled) setMapsStatus('ready');
+    }).catch((error: Error) => {
+      if (!cancelled) { setMapsStatus('error'); setMapsError(error.message || 'Não foi possível carregar o Google Maps.'); }
+    });
+    return () => { cancelled = true; };
+  }, [apiKey]);
+
+  useEffect(() => {
+    if (mapsStatus !== 'ready') return;
+    let cancelled = false;
+    Promise.allSettled(places.map(async (savedPlace) => {
+      const livePlace = new google.maps.places.Place({ id: savedPlace.placeId, requestedLanguage: 'pt-BR' });
+      await livePlace.fetchFields({ fields: placeFields });
+      const hydrated = toSavedPlace(livePlace, savedPlace.destination ?? 'Madri', savedPlace.note, savedPlace.id, userPosition);
+      if (!cancelled) setPlaces((current) => current.map((item) => item.id === savedPlace.id ? { ...hydrated, note: item.note } : item));
+    }));
+    return () => { cancelled = true; };
+    // Refresh once after the official Google APIs become available.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapsStatus]);
+
   const visiblePlaces = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase('pt-BR');
+    const normalized = mapsStatus === 'ready' ? '' : query.trim().toLocaleLowerCase('pt-BR');
     return places.filter((place) => {
       const matches = !normalized || `${place.name} ${place.category} ${place.address}`.toLocaleLowerCase('pt-BR').includes(normalized);
       return (place.destination ?? 'Madri') === currentMap && matches && (!onlyOpen || place.status === 'open');
     });
-  }, [places, query, onlyOpen, currentMap]);
+  }, [places, query, onlyOpen, currentMap, mapsStatus]);
+
+  useEffect(() => {
+    if (mapsStatus !== 'ready' || query.trim().length < 2) { setPredictions([]); return; }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setIsSearchingGoogle(true);
+      try {
+        const { AutocompleteSuggestion, AutocompleteSessionToken } = await google.maps.importLibrary('places') as google.maps.PlacesLibrary;
+        if (!sessionTokenRef.current) sessionTokenRef.current = new AutocompleteSessionToken();
+        const { suggestions } = await AutocompleteSuggestion.fetchAutocompleteSuggestions({
+          input: query, language: 'pt-BR', region: 'BR', sessionToken: sessionTokenRef.current,
+          locationBias: liveMap?.getBounds() ?? undefined,
+          origin: userPosition ?? liveMap?.getCenter() ?? undefined,
+        });
+        if (!cancelled) setPredictions(suggestions.map((suggestion) => suggestion.placePrediction).filter((prediction): prediction is google.maps.places.PlacePrediction => Boolean(prediction)).slice(0, 6));
+      } catch (error) {
+        if (!cancelled) { setPredictions([]); setMapsError(error instanceof Error ? error.message : 'A busca do Google Places não respondeu.'); }
+      } finally { if (!cancelled) setIsSearchingGoogle(false); }
+    }, 280);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [query, mapsStatus, liveMap, userPosition]);
+
+  useEffect(() => {
+    if (!userPosition) return;
+    setPlaces((current) => current.map((place) => place.lat != null && place.lng != null ? { ...place, distance: formatDistance(haversineMeters(userPosition, { lat: place.lat, lng: place.lng })) } : place));
+    setLocationLabel('Localização ao vivo');
+  }, [userPosition]);
 
   const selected = places.find((place) => place.id === selectedId) ?? places[0];
 
@@ -114,7 +190,7 @@ export default function Home() {
     if (!navigator.geolocation) { setToast('Localização não disponível neste dispositivo'); return; }
     setLocationLabel('Localizando…');
     navigator.geolocation.getCurrentPosition(
-      () => { setLocationLabel('Localização atualizada agora'); setToast('Você está no centro de Madri'); },
+      (position) => { const next = { lat: position.coords.latitude, lng: position.coords.longitude }; setUserPosition(next); liveMap?.panTo(next); setLocationLabel('Localização ao vivo'); setToast('Mapa centralizado na sua localização'); },
       () => { setLocationLabel('Centro de Madri'); setToast('Usando o centro de Madri como referência'); },
       { enableHighAccuracy: true, timeout: 8000 },
     );
@@ -134,11 +210,30 @@ export default function Home() {
     setToast(`Mapa “${mapName}” criado`); setNewMapName(''); setMapsOpen(false);
   }
 
-  function addSuggestedPlace(place: Place) {
-    const savedPlace = { ...place, id: `${place.id}-${currentMap}`, destination: currentMap };
-    if (!places.some((item) => item.placeId === place.placeId && (item.destination ?? 'Madri') === currentMap)) setPlaces((current) => [...current, savedPlace]);
-    setSelectedId(savedPlace.id); setAddPlaceOpen(false);
-    setToast(`${place.name} salvo no roteiro`);
+  async function selectGooglePrediction(prediction: google.maps.places.PlacePrediction) {
+    setIsSearchingGoogle(true);
+    try {
+      const livePlace = prediction.toPlace();
+      await livePlace.fetchFields({ fields: placeFields });
+      const savedPlace = toSavedPlace(livePlace, currentMap, '', `${livePlace.id}-${currentMap}`, userPosition);
+      setPlaces((current) => {
+        const existing = current.find((item) => item.placeId === savedPlace.placeId && (item.destination ?? 'Madri') === currentMap);
+        return existing ? current.map((item) => item.id === existing.id ? { ...savedPlace, id: existing.id, note: existing.note } : item) : [...current, savedPlace];
+      });
+      setSelectedId(savedPlace.id); setQuery(''); setPredictions([]); setAddPlaceOpen(false);
+      sessionTokenRef.current = null;
+      if (savedPlace.lat != null && savedPlace.lng != null) { liveMap?.panTo({ lat: savedPlace.lat, lng: savedPlace.lng }); liveMap?.setZoom(16); }
+      setToast(`${savedPlace.name} salvo pelo Google Places`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Não foi possível salvar este lugar');
+    } finally { setIsSearchingGoogle(false); }
+  }
+
+  function connectGoogleMaps(key: string) {
+    const cleanKey = key.trim();
+    if (!cleanKey) return;
+    localStorage.setItem('roamly-google-maps-key', cleanKey);
+    setApiKey(cleanKey);
   }
 
   useEffect(() => {
@@ -161,8 +256,22 @@ export default function Home() {
       <section className="toolbar" aria-label="Ferramentas do mapa">
         <div className="search-wrap">
           <Search size={19} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar no seu roteiro" aria-label="Buscar no seu roteiro" />
+          <input ref={searchInputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={mapsStatus === 'ready' ? 'Buscar no Google Maps' : 'Buscar no seu roteiro'} aria-label="Buscar lugares no Google Maps" autoComplete="off" />
+          {isSearchingGoogle && <span className="search-spinner" aria-label="Buscando" />}
           {query && <button onClick={() => setQuery('')} aria-label="Limpar busca"><X size={16} /></button>}
+          {mapsStatus === 'ready' && query.trim().length >= 2 && (
+            <div className="google-results" role="listbox" aria-label="Resultados do Google Maps">
+              {predictions.map((prediction) => (
+                <button key={prediction.placeId} onClick={() => selectGooglePrediction(prediction)} role="option">
+                  <span className="result-pin"><MapPin size={16} /></span>
+                  <span><strong>{prediction.mainText?.toString() || prediction.text.toString()}</strong><small>{prediction.secondaryText?.toString() || 'Google Maps'}</small></span>
+                  {prediction.distanceMeters != null && <em>{formatDistance(prediction.distanceMeters)}</em>}
+                </button>
+              ))}
+              {!isSearchingGoogle && predictions.length === 0 && <p>Nenhum resultado encontrado.</p>}
+              <div className="google-attribution"><img src="https://maps.gstatic.com/mapfiles/api-3/images/powered-by-google-on-white3.png" alt="Powered by Google" /></div>
+            </div>
+          )}
         </div>
         <button className={`filter-button ${onlyOpen ? 'active' : ''}`} onClick={() => setFilterOpen((value) => !value)} aria-label="Filtrar lugares">
           <SlidersHorizontal size={19} /><span>Filtros</span>{onlyOpen && <i />}
@@ -182,17 +291,17 @@ export default function Home() {
         <aside className="desktop-panel">
           <div className="panel-heading">
             <div><span className="eyebrow">QUARTA, 26 AGO</span><h1>Seu dia em {currentMap}</h1><p>{visiblePlaces.length} lugares · 2,8 km</p></div>
-            <button className="small-add" onClick={() => setAddPlaceOpen(true)}><Plus size={19} /></button>
+            <button className="small-add" onClick={() => { setAddPlaceOpen(true); window.setTimeout(() => searchInputRef.current?.focus(), 80); }}><Plus size={19} /></button>
           </div>
           <div className="progress-card"><span><Sparkles size={15} /> Bom momento para explorar</span><p>2 lugares estão abertos e perto de você.</p></div>
           <div className="place-list desktop-list">
             {visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selected.id} onSelect={() => setSelectedId(place.id)} />)}
           </div>
-          <button className="add-place-button" onClick={() => setAddPlaceOpen(true)}><Plus size={18} /> Adicionar lugar</button>
+          <button className="add-place-button" onClick={() => { setAddPlaceOpen(true); window.setTimeout(() => searchInputRef.current?.focus(), 80); }}><Plus size={18} /> Adicionar pelo Google Maps</button>
         </aside>
 
         <div className={`map-area ${view === 'list' ? 'mobile-list-view' : ''}`}>
-          <div className="map-canvas" style={{ '--map-scale': zoom } as React.CSSProperties}>
+          <div className={`map-canvas ${mapsStatus === 'ready' ? 'map-canvas-hidden' : ''}`} style={{ '--map-scale': zoom } as React.CSSProperties}>
             <div className="map-text label-sol">SOL</div><div className="map-text label-retiro">RETIRO</div>
             <div className="map-text street-one">Calle de Alcalá</div><div className="map-text street-two">Gran Vía</div>
             <div className="park park-one" /><div className="park park-two" /><div className="water" />
@@ -206,7 +315,9 @@ export default function Home() {
             ))}
             {visiblePlaces.length === 0 && <div className="empty-map"><Search size={24} /><strong>Nenhum lugar encontrado</strong><span>Tente buscar outro nome ou remover os filtros.</span></div>}
           </div>
-          <div className="map-controls"><button onClick={() => setZoom((value) => Math.min(1.14, value + .04))} aria-label="Aumentar zoom">+</button><button onClick={() => setZoom((value) => Math.max(.9, value - .04))} aria-label="Diminuir zoom">−</button></div>
+          {mapsStatus === 'ready' && <LiveGoogleMap places={visiblePlaces} selectedId={selectedId} onSelect={setSelectedId} onUserPosition={setUserPosition} onMapReady={setLiveMap} />}
+          {mapsStatus !== 'ready' && <MapsConnection status={mapsStatus} error={mapsError} onConnect={connectGoogleMaps} />}
+          <div className="map-controls"><button onClick={() => liveMap ? liveMap.setZoom(Math.min(20, (liveMap.getZoom() ?? 13) + 1)) : setZoom((value) => Math.min(1.14, value + .04))} aria-label="Aumentar zoom">+</button><button onClick={() => liveMap ? liveMap.setZoom(Math.max(2, (liveMap.getZoom() ?? 13) - 1)) : setZoom((value) => Math.max(.9, value - .04))} aria-label="Diminuir zoom">−</button></div>
           <button className="locate-button" onClick={useMyLocation} aria-label="Usar minha localização"><LocateFixed size={21} /></button>
 
           <div className="mobile-list">
@@ -219,6 +330,7 @@ export default function Home() {
               <button className="close-card" onClick={() => setSelectedId('')} aria-label="Fechar detalhes"><X size={18} /></button>
               <div className="place-photo" style={{ backgroundImage: `linear-gradient(180deg, transparent 45%, rgba(17,25,21,.62)), url('${selected.photo}')` }}>
                 <span className={`status-pill ${selected.status}`}><i />{selected.statusLabel}</span><span className="rating"><Star size={13} fill="currentColor" /> {selected.rating}</span>
+                {selected.photoAttribution && <a className="photo-credit" href={selected.photoAttribution.url} target="_blank" rel="noreferrer">Foto: {selected.photoAttribution.name}</a>}
               </div>
               <div className="place-content">
                 <div className="place-title"><div><span>{selected.category}</span><h2>{selected.name}</h2></div><strong>{selected.distance}</strong></div>
@@ -272,16 +384,20 @@ export default function Home() {
         <div className="modal-backdrop" onClick={() => setAddPlaceOpen(false)}>
           <section className="maps-modal" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Adicionar lugar">
             <div className="modal-heading"><div><span>GOOGLE PLACES</span><h2>Adicionar ao roteiro</h2></div><button onClick={() => setAddPlaceOpen(false)} aria-label="Fechar"><X size={19} /></button></div>
-            <div className="places-search"><Search size={18} /><input placeholder="Buscar por nome ou endereço" autoFocus /></div>
-            <p className="source-note">Resultados vinculados ao <code>place_id</code> oficial.</p>
-            {suggestedPlaces.map((place) => {
-              const saved = places.some((item) => item.placeId === place.placeId && (item.destination ?? 'Madri') === currentMap);
-              return <button key={place.placeId} className="suggestion-row" onClick={() => !saved && addSuggestedPlace(place)} disabled={saved}>
-                <span className="row-photo" style={{ backgroundImage: `url('${place.photo}')` }} />
-                <span><strong>{place.name}</strong><small>{place.address}</small><em>{place.statusLabel}</em></span>
+            <div className="places-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar no Google Maps" autoFocus autoComplete="off" />{isSearchingGoogle && <span className="search-spinner" />}</div>
+            <p className="source-note">Nome, endereço, fotos e horários vêm do Google Places e são salvos pelo <code>place_id</code>.</p>
+            {mapsStatus !== 'ready' && <div className="places-unavailable"><MapIcon size={23} /><strong>Conecte o Google Maps primeiro</strong><span>Feche esta janela e use o cartão exibido sobre o mapa.</span></div>}
+            {mapsStatus === 'ready' && query.trim().length < 2 && <div className="places-unavailable"><Search size={23} /><strong>Busque qualquer lugar</strong><span>Restaurantes, museus, atrações, hotéis e muito mais.</span></div>}
+            {mapsStatus === 'ready' && predictions.map((prediction) => {
+              const saved = places.some((item) => item.placeId === prediction.placeId && (item.destination ?? 'Madri') === currentMap);
+              return <button key={prediction.placeId} className="suggestion-row" onClick={() => !saved && selectGooglePrediction(prediction)} disabled={saved}>
+                <span className="result-pin"><MapPin size={17} /></span>
+                <span><strong>{prediction.mainText?.toString() || prediction.text.toString()}</strong><small>{prediction.secondaryText?.toString() || 'Google Maps'}</small><em>{prediction.distanceMeters != null ? formatDistance(prediction.distanceMeters) : 'Dados ao vivo'}</em></span>
                 <span className="suggestion-action">{saved ? <Check size={17} /> : <Plus size={17} />}</span>
               </button>;
             })}
+            {mapsStatus === 'ready' && query.trim().length >= 2 && !isSearchingGoogle && predictions.length === 0 && <div className="places-unavailable"><Search size={23} /><strong>Nenhum resultado</strong><span>Tente outro nome ou endereço.</span></div>}
+            {mapsStatus === 'ready' && <div className="google-attribution modal-google"><img src="https://maps.gstatic.com/mapfiles/api-3/images/powered-by-google-on-white3.png" alt="Powered by Google" /></div>}
           </section>
         </div>
       )}
@@ -299,3 +415,164 @@ function PlaceRow({ place, active, onSelect }: { place: Place; active: boolean; 
     </button>
   );
 }
+
+const placeFields = [
+  'id', 'displayName', 'formattedAddress', 'location', 'viewport', 'primaryTypeDisplayName',
+  'rating', 'photos', 'currentOpeningHours', 'regularOpeningHours', 'utcOffsetMinutes', 'googleMapsURI',
+];
+
+function loadGoogleMaps(apiKey: string) {
+  if (typeof google !== 'undefined') return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-roamly-google-maps]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve(), { once: true });
+      existing.addEventListener('error', () => reject(new Error('Falha ao carregar o Google Maps. Confira a chave e as APIs habilitadas.')), { once: true });
+      return;
+    }
+    const script = document.createElement('script');
+    script.dataset.roamlyGoogleMaps = 'true';
+    script.async = true;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&loading=async&language=pt-BR&region=BR&libraries=places,marker`;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Falha ao carregar o Google Maps. Confira a chave e as APIs habilitadas.'));
+    document.head.appendChild(script);
+  });
+}
+
+function LiveGoogleMap({
+  places, selectedId, onSelect, onUserPosition, onMapReady,
+}: {
+  places: Place[]; selectedId: string; onSelect: (id: string) => void;
+  onUserPosition: (position: google.maps.LatLngLiteral) => void;
+  onMapReady: (map: google.maps.Map) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const markersRef = useRef<google.maps.marker.AdvancedMarkerElement[]>([]);
+  const userMarkerRef = useRef<google.maps.marker.AdvancedMarkerElement | null>(null);
+
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return;
+    const first = places.find((place) => place.lat != null && place.lng != null);
+    const map = new google.maps.Map(containerRef.current, {
+      center: first?.lat != null && first.lng != null ? { lat: first.lat, lng: first.lng } : { lat: 40.4168, lng: -3.7038 },
+      zoom: 14, mapId: 'DEMO_MAP_ID', disableDefaultUI: true, clickableIcons: true,
+      gestureHandling: 'greedy', backgroundColor: '#edf0e9',
+    });
+    mapRef.current = map; onMapReady(map);
+  }, [onMapReady, places]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    markersRef.current.forEach((marker) => { marker.map = null; });
+    markersRef.current = places.filter((place) => place.lat != null && place.lng != null).map((place) => {
+      const colors: Record<PlaceStatus, string> = { open: '#1f7a50', soon: '#e1a43a', closed: '#9a7068' };
+      const pin = new google.maps.marker.PinElement({
+        background: colors[place.status], borderColor: '#ffffff', glyphColor: '#ffffff',
+        glyphText: place.category === 'Restaurante' ? 'R' : place.category === 'Parque' ? 'P' : '•',
+        scale: place.id === selectedId ? 1.28 : 1.05,
+      });
+      const marker = new google.maps.marker.AdvancedMarkerElement({
+        map, position: { lat: place.lat!, lng: place.lng! }, title: `${place.name} — ${place.statusLabel}`,
+        content: pin, gmpClickable: true, zIndex: place.id === selectedId ? 20 : 10,
+      });
+      marker.addEventListener('gmp-click', () => onSelect(place.id));
+      return marker;
+    });
+  }, [places, selectedId, onSelect]);
+
+  useEffect(() => {
+    const place = places.find((item) => item.id === selectedId);
+    if (place?.lat != null && place.lng != null && mapRef.current) mapRef.current.panTo({ lat: place.lat, lng: place.lng });
+  }, [selectedId, places]);
+
+  useEffect(() => {
+    if (!navigator.geolocation || !mapRef.current) return;
+    const watchId = navigator.geolocation.watchPosition((position) => {
+      const next = { lat: position.coords.latitude, lng: position.coords.longitude };
+      onUserPosition(next);
+      if (!userMarkerRef.current) {
+        const dot = document.createElement('div');
+        dot.className = 'live-user-marker';
+        dot.setAttribute('aria-label', 'Sua localização ao vivo');
+        userMarkerRef.current = new google.maps.marker.AdvancedMarkerElement({ map: mapRef.current, position: next, title: 'Sua localização ao vivo', content: dot, zIndex: 50 });
+        mapRef.current?.panTo(next);
+      } else userMarkerRef.current.position = next;
+    }, () => undefined, { enableHighAccuracy: true, maximumAge: 5000, timeout: 12000 });
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [onUserPosition]);
+
+  return <div ref={containerRef} className="live-google-map" aria-label="Mapa ao vivo do Google Maps" />;
+}
+
+function MapsConnection({ status, error, onConnect }: { status: MapsStatus; error: string; onConnect: (key: string) => void }) {
+  const [key, setKey] = useState('');
+  if (status === 'loading') return <div className="maps-connect-card compact"><span className="search-spinner" /><strong>Carregando Google Maps…</strong></div>;
+  return (
+    <div className="maps-connect-card">
+      <span className="google-badge"><MapIcon size={23} /></span>
+      <div><small>MAPA AO VIVO</small><h2>Conectar Google Maps</h2><p>Use uma chave com Maps JavaScript API e Places API (New) habilitadas. Restrinja-a a este domínio.</p></div>
+      {error && <p className="maps-error">{error}</p>}
+      <div className="key-form"><input type="password" value={key} onChange={(event) => setKey(event.target.value)} placeholder="Cole sua chave do Google Maps" aria-label="Chave do Google Maps" onKeyDown={(event) => event.key === 'Enter' && onConnect(key)} /><button onClick={() => onConnect(key)}>Conectar</button></div>
+      <span className="key-note">A chave fica somente neste navegador. Para publicar sem esta etapa, configure-a no ambiente do site.</span>
+    </div>
+  );
+}
+
+function toSavedPlace(livePlace: google.maps.places.Place, destination: string, note: string, id: string, userPosition: google.maps.LatLngLiteral | null): Place {
+  const location = livePlace.location?.toJSON();
+  const hours = livePlace.currentOpeningHours ?? livePlace.regularOpeningHours;
+  const schedule = getLiveSchedule(hours, livePlace.utcOffsetMinutes ?? 0);
+  const photo = livePlace.photos?.[0];
+  const attribution = photo?.authorAttributions?.[0];
+  return {
+    id, placeId: livePlace.id, destination, note,
+    name: livePlace.displayName || 'Lugar sem nome',
+    category: livePlace.primaryTypeDisplayName || 'Lugar',
+    address: livePlace.formattedAddress || 'Endereço não informado',
+    hours: schedule.hours, status: schedule.status, statusLabel: schedule.label,
+    distance: location && userPosition ? formatDistance(haversineMeters(userPosition, location)) : '—',
+    photo: photo?.getURI({ maxWidth: 1200, maxHeight: 800 }) || '',
+    photoAttribution: attribution?.uri ? { name: attribution.displayName, url: attribution.uri } : undefined,
+    x: 50, y: 50, rating: livePlace.rating?.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) || '—',
+    lat: location?.lat, lng: location?.lng,
+  };
+}
+
+function getLiveSchedule(openingHours: google.maps.places.OpeningHours | null | undefined, utcOffsetMinutes: number): { status: PlaceStatus; label: string; hours: string } {
+  if (!openingHours?.periods?.length) return { status: 'closed', label: 'Horário não informado', hours: 'Consulte o Google Maps' };
+  const localNow = new Date(Date.now() + utcOffsetMinutes * 60_000);
+  const nowMinutes = localNow.getUTCDay() * 1440 + localNow.getUTCHours() * 60 + localNow.getUTCMinutes();
+  const week = 7 * 1440;
+  const periods = openingHours.periods.map((period) => {
+    const start = period.open.day * 1440 + period.open.hour * 60 + period.open.minute;
+    let end = period.close ? period.close.day * 1440 + period.close.hour * 60 + period.close.minute : start + week;
+    if (end <= start) end += week;
+    return { start, end, open: period.open, close: period.close };
+  });
+  const current = periods.find((period) => (nowMinutes >= period.start && nowMinutes < period.end) || (nowMinutes + week >= period.start && nowMinutes + week < period.end));
+  const todaysPeriod = periods.find((period) => period.open.day === localNow.getUTCDay());
+  const hours = todaysPeriod ? `${formatClock(todaysPeriod.open.hour, todaysPeriod.open.minute)} – ${todaysPeriod.close ? formatClock(todaysPeriod.close.hour, todaysPeriod.close.minute) : '24h'}` : 'Fechado hoje';
+  if (current) {
+    const comparableNow = nowMinutes < current.start ? nowMinutes + week : nowMinutes;
+    const remaining = current.end - comparableNow;
+    return remaining <= 60 ? { status: 'soon', label: `Fecha em ${remaining} min`, hours } : { status: 'open', label: 'Aberto agora', hours };
+  }
+  const next = periods.map((period) => ({ ...period, wait: (period.start - nowMinutes + week) % week })).filter((period) => period.wait > 0).sort((a, b) => a.wait - b.wait)[0];
+  if (!next) return { status: 'closed', label: 'Fechado', hours };
+  return next.wait <= 60 ? { status: 'soon', label: `Abre em ${next.wait} min`, hours } : { status: 'closed', label: `Abre às ${formatClock(next.open.hour, next.open.minute)}`, hours };
+}
+
+function formatClock(hour: number, minute: number) { return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`; }
+
+function haversineMeters(a: google.maps.LatLngLiteral, b: google.maps.LatLngLiteral) {
+  const toRad = (value: number) => value * Math.PI / 180;
+  const radius = 6371e3;
+  const dLat = toRad(b.lat - a.lat); const dLng = toRad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return radius * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function formatDistance(meters: number) { return meters < 1000 ? `${Math.max(10, Math.round(meters / 10) * 10)} m` : `${(meters / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} km`; }
