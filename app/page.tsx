@@ -3,7 +3,7 @@
 import {
   Bike, BusFront, Car, Check, ChevronDown, Clock3, Compass, Footprints, LocateFixed,
   Map as MapIcon, MapPin, Menu, Navigation, Plus, Search, SlidersHorizontal,
-  Sparkles, Star, X,
+  Sparkles, Star, Trash2, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
@@ -12,7 +12,7 @@ type Place = {
   id: string; placeId: string; name: string; category: string; address: string;
   hours: string; status: PlaceStatus; statusLabel: string; distance: string;
   note: string; photo: string; x: number; y: number; rating: string; destination?: string;
-  lat?: number; lng?: number; photoAttribution?: { name: string; url: string };
+  lat?: number; lng?: number; googleMapsURI?: string; photoAttribution?: { name: string; url: string };
 };
 
 type MapsStatus = 'loading' | 'ready' | 'needs-key' | 'error';
@@ -60,6 +60,21 @@ const initialPlaces: Place[] = [
 ];
 
 const statusCopy: Record<PlaceStatus, string> = { open: 'Aberto', soon: 'Em breve', closed: 'Fechado' };
+const removedPlacesStorageKey = 'roamly-removed-place-keys';
+
+function placeKey(placeId: string, destination = 'Madri') {
+  return `${placeId}:${destination.trim().toLocaleLowerCase('pt-BR')}`;
+}
+
+function dedupePlaces(items: Place[]) {
+  const seen = new Set<string>();
+  return items.filter((place) => {
+    const key = placeKey(place.placeId, place.destination ?? 'Madri');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 export default function Home() {
   const [places, setPlaces] = useState(initialPlaces);
@@ -77,6 +92,8 @@ export default function Home() {
   const [locationLabel, setLocationLabel] = useState('Sua localização');
   const [toast, setToast] = useState('');
   const [zoom, setZoom] = useState(1);
+  const [storageReady, setStorageReady] = useState(false);
+  const [isLocating, setIsLocating] = useState(false);
   const [mapsStatus, setMapsStatus] = useState<MapsStatus>('loading');
   const [mapsError, setMapsError] = useState('');
   const [apiKey, setApiKey] = useState<string | null>(null);
@@ -85,6 +102,7 @@ export default function Home() {
   const [liveMap, setLiveMap] = useState<google.maps.Map | null>(null);
   const [userPosition, setUserPosition] = useState<google.maps.LatLngLiteral | null>(null);
   const sessionTokenRef = useRef<google.maps.places.AutocompleteSessionToken | null>(null);
+  const addingPlaceKeysRef = useRef(new Set<string>());
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -93,25 +111,28 @@ export default function Home() {
       const notes = savedNotes ? JSON.parse(savedNotes) as Record<string, string> : {};
       const savedMaps = JSON.parse(localStorage.getItem('roamly-maps') ?? '[]') as string[];
       const savedRefs = JSON.parse(localStorage.getItem('roamly-place-refs') ?? '[]') as Array<{ id: string; placeId: string; destination: string; note?: string }>;
+      const removedKeys = new Set(JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[]);
       if (savedMaps.length) setMaps((current) => Array.from(new Set([...current, ...savedMaps])));
       setPlaces((current) => {
         const hydrated = current.map((place) => ({ ...place, note: notes[place.id] ?? place.note }));
-        const known = new Set(hydrated.map((place) => `${place.placeId}:${place.destination ?? 'Madri'}`));
-        const restored = savedRefs.filter((ref) => !known.has(`${ref.placeId}:${ref.destination}`)).map((ref, index) => ({
+        const known = new Set(hydrated.map((place) => placeKey(place.placeId, place.destination ?? 'Madri')));
+        const restored = savedRefs.filter((ref) => !known.has(placeKey(ref.placeId, ref.destination))).map((ref, index) => ({
           id: ref.id, placeId: ref.placeId, destination: ref.destination, note: ref.note ?? '',
           name: 'Carregando lugar…', category: 'Google Places', address: '', hours: 'Consultando horários',
           status: 'closed' as PlaceStatus, statusLabel: 'Atualizando', distance: '—', photo: '',
           x: 45 + index * 4, y: 45 + index * 3, rating: '—',
         }));
-        return [...hydrated, ...restored];
+        return dedupePlaces([...hydrated, ...restored]).filter((place) => !removedKeys.has(placeKey(place.placeId, place.destination ?? 'Madri')));
       });
     } catch { /* Keep curated defaults if local data is invalid. */ }
+    setStorageReady(true);
   }, []);
 
   useEffect(() => {
+    if (!storageReady) return;
     localStorage.setItem('roamly-maps', JSON.stringify(maps));
-    localStorage.setItem('roamly-place-refs', JSON.stringify(places.map((place) => ({ id: place.id, placeId: place.placeId, destination: place.destination ?? 'Madri', note: place.note }))));
-  }, [maps, places]);
+    localStorage.setItem('roamly-place-refs', JSON.stringify(dedupePlaces(places).map((place) => ({ id: place.id, placeId: place.placeId, destination: place.destination ?? 'Madri', note: place.note }))));
+  }, [maps, places, storageReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -140,11 +161,8 @@ export default function Home() {
     if (mapsStatus !== 'ready') return;
     let cancelled = false;
     Promise.allSettled(places.map(async (savedPlace) => {
-      const ModernPlace = (google.maps.places as unknown as { Place?: typeof google.maps.places.Place }).Place;
-      const hydrated = ModernPlace
-        ? await hydrateModernPlace(ModernPlace, savedPlace, userPosition)
-        : toSavedLegacyPlace(await fetchLegacyPlaceDetails(savedPlace.placeId), savedPlace.destination ?? 'Madri', savedPlace.note, savedPlace.id, userPosition);
-      if (!cancelled) setPlaces((current) => current.map((item) => item.id === savedPlace.id ? { ...hydrated, note: item.note } : item));
+      const hydrated = await hydratePlaceById(savedPlace, userPosition);
+      if (!cancelled) setPlaces((current) => dedupePlaces(current.map((item) => item.id === savedPlace.id ? { ...hydrated, note: item.note } : item)));
     }));
     return () => { cancelled = true; };
     // Refresh once after the official Google APIs become available.
@@ -169,7 +187,7 @@ export default function Home() {
         if (!sessionTokenRef.current) sessionTokenRef.current = new google.maps.places.AutocompleteSessionToken();
         if (placesRuntime.AutocompleteSuggestion) {
           const { suggestions } = await placesRuntime.AutocompleteSuggestion.fetchAutocompleteSuggestions({
-            input: query, language: 'pt-BR', region: 'BR', sessionToken: sessionTokenRef.current,
+            input: query, language: 'pt-BR', sessionToken: sessionTokenRef.current,
             locationBias: liveMap?.getBounds() ?? undefined,
             origin: userPosition ?? liveMap?.getCenter() ?? undefined,
           });
@@ -179,7 +197,7 @@ export default function Home() {
           })));
         } else if ((google.maps.places as unknown as { AutocompleteService?: typeof google.maps.places.AutocompleteService }).AutocompleteService) {
           const service = new google.maps.places.AutocompleteService();
-          const response = await service.getPlacePredictions({ input: query, language: 'pt-BR', region: 'br', sessionToken: sessionTokenRef.current, locationBias: liveMap?.getBounds() ?? undefined, origin: userPosition ?? liveMap?.getCenter() ?? undefined });
+          const response = await service.getPlacePredictions({ input: query, language: 'pt-BR', sessionToken: sessionTokenRef.current, locationBias: liveMap?.getBounds() ?? undefined, origin: userPosition ?? liveMap?.getCenter() ?? undefined });
           if (!cancelled) setPredictions(response.predictions.slice(0, 6).map((prediction) => ({
             placeId: prediction.place_id, mainText: prediction.structured_formatting.main_text,
             secondaryText: prediction.structured_formatting.secondary_text, distanceMeters: prediction.distance_meters,
@@ -209,19 +227,27 @@ export default function Home() {
   }
 
   function useMyLocation() {
+    if (isLocating) return;
+    if (userPosition && liveMap) {
+      liveMap.panTo(userPosition);
+      liveMap.setZoom(16);
+      setLocationLabel('Localização ao vivo');
+      setToast('Mapa centralizado na sua localização');
+      return;
+    }
     if (!navigator.geolocation) { setToast('Localização não disponível neste dispositivo'); return; }
+    setIsLocating(true);
     setLocationLabel('Localizando…');
     navigator.geolocation.getCurrentPosition(
-      (position) => { const next = { lat: position.coords.latitude, lng: position.coords.longitude }; setUserPosition(next); liveMap?.panTo(next); setLocationLabel('Localização ao vivo'); setToast('Mapa centralizado na sua localização'); },
-      () => { setLocationLabel('Centro de Madri'); setToast('Usando o centro de Madri como referência'); },
-      { enableHighAccuracy: true, timeout: 8000 },
+      (position) => { const next = { lat: position.coords.latitude, lng: position.coords.longitude }; setUserPosition(next); liveMap?.panTo(next); liveMap?.setZoom(16); setLocationLabel('Localização ao vivo'); setIsLocating(false); setToast('Mapa centralizado na sua localização'); },
+      () => { setLocationLabel('Localização indisponível'); setIsLocating(false); setToast('Permita o acesso à localização para centralizar o mapa'); },
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 },
     );
   }
 
-  function openDirections(mode: 'walking' | 'driving' | 'bicycling' | 'transit') {
-    const destination = encodeURIComponent(selected.name);
-    window.open(`https://www.google.com/maps/dir/?api=1&destination=${destination}&destination_place_id=${selected.placeId}&travelmode=${mode}`, '_blank', 'noopener,noreferrer');
-    setRouteOpen(false);
+  function openRouteOptions() {
+    setRouteOpen(true);
+    if (!userPosition) useMyLocation();
   }
 
   function createMap() {
@@ -233,22 +259,49 @@ export default function Home() {
   }
 
   async function selectGooglePrediction(prediction: SearchPrediction) {
+    const key = placeKey(prediction.placeId, currentMap);
+    const existing = places.find((item) => placeKey(item.placeId, item.destination ?? 'Madri') === key);
+    if (existing) {
+      setSelectedId(existing.id); setQuery(''); setPredictions([]); setAddPlaceOpen(false);
+      if (existing.lat != null && existing.lng != null) { liveMap?.panTo({ lat: existing.lat, lng: existing.lng }); liveMap?.setZoom(16); }
+      setToast(`${existing.name} já está neste roteiro`);
+      return;
+    }
+    if (addingPlaceKeysRef.current.has(key)) return;
+    addingPlaceKeysRef.current.add(key);
     setIsSearchingGoogle(true);
     try {
-      const savedPlace = prediction.modern
-        ? await hydrateModernPlaceFromPrediction(prediction.modern, currentMap, userPosition)
-        : toSavedLegacyPlace(await fetchLegacyPlaceDetails(prediction.placeId), currentMap, '', `${prediction.placeId}-${currentMap}`, userPosition);
-      setPlaces((current) => {
-        const existing = current.find((item) => item.placeId === savedPlace.placeId && (item.destination ?? 'Madri') === currentMap);
-        return existing ? current.map((item) => item.id === existing.id ? { ...savedPlace, id: existing.id, note: existing.note } : item) : [...current, savedPlace];
-      });
+      const savedPlace = await hydratePrediction(prediction, currentMap, userPosition);
+      setPlaces((current) => dedupePlaces([...current, savedPlace]));
+      try {
+        const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
+        localStorage.setItem(removedPlacesStorageKey, JSON.stringify(removed.filter((removedKey) => removedKey !== key)));
+      } catch { /* A fresh save can continue if old local preferences are malformed. */ }
       setSelectedId(savedPlace.id); setQuery(''); setPredictions([]); setAddPlaceOpen(false);
       sessionTokenRef.current = null;
       if (savedPlace.lat != null && savedPlace.lng != null) { liveMap?.panTo({ lat: savedPlace.lat, lng: savedPlace.lng }); liveMap?.setZoom(16); }
       setToast(`${savedPlace.name} salvo pelo Google Places`);
     } catch (error) {
       setToast(error instanceof Error ? error.message : 'Não foi possível salvar este lugar');
-    } finally { setIsSearchingGoogle(false); }
+    } finally { addingPlaceKeysRef.current.delete(key); setIsSearchingGoogle(false); }
+  }
+
+  function removeSelectedPlace() {
+    if (!selected || !window.confirm(`Remover “${selected.name}” deste roteiro?`)) return;
+    const key = placeKey(selected.placeId, selected.destination ?? 'Madri');
+    const remaining = places.filter((place) => placeKey(place.placeId, place.destination ?? 'Madri') !== key);
+    setPlaces(remaining);
+    try {
+      const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
+      localStorage.setItem(removedPlacesStorageKey, JSON.stringify(Array.from(new Set([...removed, key]))));
+      const notes = JSON.parse(localStorage.getItem('roamly-notes') ?? '{}') as Record<string, string>;
+      delete notes[selected.id];
+      localStorage.setItem('roamly-notes', JSON.stringify(notes));
+    } catch { /* The React state still removes the place for this session. */ }
+    const nextSelected = remaining.find((place) => (place.destination ?? 'Madri') === currentMap);
+    setSelectedId(nextSelected?.id ?? '');
+    setRouteOpen(false);
+    setToast(`${selected.name} removido do roteiro`);
   }
 
   function connectGoogleMaps(key: string) {
@@ -283,13 +336,14 @@ export default function Home() {
           {query && <button onClick={() => setQuery('')} aria-label="Limpar busca"><X size={16} /></button>}
           {mapsStatus === 'ready' && query.trim().length >= 2 && (
             <div className="google-results" role="listbox" aria-label="Resultados do Google Maps">
-              {predictions.map((prediction) => (
-                <button key={prediction.placeId} onClick={() => selectGooglePrediction(prediction)} role="option">
+              {predictions.map((prediction) => {
+                const saved = places.some((item) => placeKey(item.placeId, item.destination ?? 'Madri') === placeKey(prediction.placeId, currentMap));
+                return <button key={prediction.placeId} onClick={() => !saved && selectGooglePrediction(prediction)} role="option" disabled={saved} aria-disabled={saved}>
                   <span className="result-pin"><MapPin size={16} /></span>
                   <span><strong>{prediction.mainText}</strong><small>{prediction.secondaryText}</small></span>
-                  {prediction.distanceMeters != null && <em>{formatDistance(prediction.distanceMeters)}</em>}
-                </button>
-              ))}
+                  {saved ? <em className="saved-result"><Check size={13} /> Salvo</em> : prediction.distanceMeters != null && <em>{formatDistance(prediction.distanceMeters)}</em>}
+                </button>;
+              })}
               {!isSearchingGoogle && predictions.length === 0 && <p>Nenhum resultado encontrado.</p>}
               {mapsError && <p className="search-api-warning">{mapsError}</p>}
               <div className="google-attribution"><img src="https://maps.gstatic.com/mapfiles/api-3/images/powered-by-google-on-white3.png" alt="Powered by Google" /></div>
@@ -341,7 +395,7 @@ export default function Home() {
           {mapsStatus === 'ready' && <LiveGoogleMap places={visiblePlaces} selectedId={selectedId} onSelect={setSelectedId} onUserPosition={setUserPosition} onMapReady={setLiveMap} />}
           {mapsStatus !== 'ready' && <MapsConnection status={mapsStatus} error={mapsError} onConnect={connectGoogleMaps} />}
           <div className="map-controls"><button onClick={() => liveMap ? liveMap.setZoom(Math.min(20, (liveMap.getZoom() ?? 13) + 1)) : setZoom((value) => Math.min(1.14, value + .04))} aria-label="Aumentar zoom">+</button><button onClick={() => liveMap ? liveMap.setZoom(Math.max(2, (liveMap.getZoom() ?? 13) - 1)) : setZoom((value) => Math.max(.9, value - .04))} aria-label="Diminuir zoom">−</button></div>
-          <button className="locate-button" onClick={useMyLocation} aria-label="Usar minha localização"><LocateFixed size={21} /></button>
+          <button className={`locate-button ${isLocating ? 'locating' : ''}`} onClick={useMyLocation} aria-label="Centralizar na minha localização" title="Centralizar na minha localização" disabled={mapsStatus !== 'ready'}><LocateFixed size={21} /></button>
 
           <div className="mobile-list">
             <div className="mobile-list-heading"><div><span className="eyebrow">QUARTA, 26 AGO</span><h2>Seu dia em {currentMap}</h2></div><span>{visiblePlaces.length} lugares</span></div>
@@ -360,7 +414,10 @@ export default function Home() {
                 <div className="meta-row"><MapPin size={16} /><span>{selected.address}</span></div>
                 <div className="meta-row"><Clock3 size={16} /><span><strong>{selected.statusLabel}</strong> · Hoje, {selected.hours}</span></div>
                 <label className="note-field"><span>NOTA PESSOAL</span><input value={selected.note} onChange={(event) => saveNote(event.target.value)} /></label>
-                <button className="go-button" onClick={() => setRouteOpen(true)}><Navigation size={19} fill="currentColor" /> Ir</button>
+                <div className="place-actions">
+                  <button className="remove-place-button" onClick={removeSelectedPlace}><Trash2 size={16} /> Remover</button>
+                  <button className="go-button" onClick={openRouteOptions}><Navigation size={19} fill="currentColor" /> Ir com Maps</button>
+                </div>
               </div>
             </article>
           )}
@@ -379,10 +436,10 @@ export default function Home() {
             <div className="sheet-handle" />
             <div className="sheet-heading"><div><span>ROTA PARA</span><h2>{selected.name}</h2><p>Saindo da sua localização</p></div><button onClick={() => setRouteOpen(false)} aria-label="Fechar"><X size={19} /></button></div>
             <div className="travel-grid">
-              <button onClick={() => openDirections('walking')}><Footprints size={24} /><strong>A pé</strong><span>14 min</span></button>
-              <button onClick={() => openDirections('driving')}><Car size={24} /><strong>Carro</strong><span>7 min</span></button>
-              <button onClick={() => openDirections('bicycling')}><Bike size={24} /><strong>Bicicleta</strong><span>6 min</span></button>
-              <button onClick={() => openDirections('transit')}><BusFront size={24} /><strong>Transporte</strong><span>11 min</span></button>
+              <a href={getDirectionsUrl(selected, 'walking', userPosition)} target="_blank" rel="noreferrer" onClick={() => setRouteOpen(false)}><Footprints size={24} /><strong>A pé</strong><span>Abrir rota</span></a>
+              <a href={getDirectionsUrl(selected, 'driving', userPosition)} target="_blank" rel="noreferrer" onClick={() => setRouteOpen(false)}><Car size={24} /><strong>Carro</strong><span>Abrir rota</span></a>
+              <a href={getDirectionsUrl(selected, 'bicycling', userPosition)} target="_blank" rel="noreferrer" onClick={() => setRouteOpen(false)}><Bike size={24} /><strong>Bicicleta</strong><span>Abrir rota</span></a>
+              <a href={getDirectionsUrl(selected, 'transit', userPosition)} target="_blank" rel="noreferrer" onClick={() => setRouteOpen(false)}><BusFront size={24} /><strong>Transporte</strong><span>Abrir rota</span></a>
             </div><p className="google-note">A rota será aberta no Google Maps.</p>
           </section>
         </div>
@@ -412,7 +469,7 @@ export default function Home() {
             {mapsStatus !== 'ready' && <div className="places-unavailable"><MapIcon size={23} /><strong>Conecte o Google Maps primeiro</strong><span>Feche esta janela e use o cartão exibido sobre o mapa.</span></div>}
             {mapsStatus === 'ready' && query.trim().length < 2 && <div className="places-unavailable"><Search size={23} /><strong>Busque qualquer lugar</strong><span>Restaurantes, museus, atrações, hotéis e muito mais.</span></div>}
             {mapsStatus === 'ready' && predictions.map((prediction) => {
-              const saved = places.some((item) => item.placeId === prediction.placeId && (item.destination ?? 'Madri') === currentMap);
+              const saved = places.some((item) => placeKey(item.placeId, item.destination ?? 'Madri') === placeKey(prediction.placeId, currentMap));
               return <button key={prediction.placeId} className="suggestion-row" onClick={() => !saved && selectGooglePrediction(prediction)} disabled={saved}>
                 <span className="result-pin"><MapPin size={17} /></span>
                 <span><strong>{prediction.mainText}</strong><small>{prediction.secondaryText}</small><em>{prediction.distanceMeters != null ? formatDistance(prediction.distanceMeters) : 'Dados ao vivo'}</em></span>
@@ -441,8 +498,22 @@ function PlaceRow({ place, active, onSelect }: { place: Place; active: boolean; 
 
 const placeFields = [
   'id', 'displayName', 'formattedAddress', 'location', 'viewport', 'primaryTypeDisplayName',
-  'rating', 'photos', 'currentOpeningHours', 'regularOpeningHours', 'utcOffsetMinutes', 'googleMapsURI',
+  'rating', 'photos', 'currentOpeningHours', 'regularOpeningHours', 'utcOffsetMinutes', 'googleMapsURI', 'businessStatus',
 ];
+
+type TravelMode = 'walking' | 'driving' | 'bicycling' | 'transit';
+
+function getDirectionsUrl(place: Place, mode: TravelMode, userPosition: google.maps.LatLngLiteral | null) {
+  const params = new URLSearchParams({
+    api: '1',
+    destination: place.name,
+    destination_place_id: place.placeId,
+    travelmode: mode,
+    dir_action: 'navigate',
+  });
+  if (userPosition) params.set('origin', `${userPosition.lat},${userPosition.lng}`);
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
 
 function loadGoogleMaps(apiKey: string) {
   const runtimeWindow = window as Window & { google?: typeof google; __roamlyGoogleMapsReady?: () => void };
@@ -559,12 +630,69 @@ async function hydrateModernPlaceFromPrediction(prediction: google.maps.places.P
   return toSavedPlace(livePlace, destination, '', `${livePlace.id}-${destination}`, userPosition);
 }
 
+async function hydratePlaceById(savedPlace: Place, userPosition: google.maps.LatLngLiteral | null) {
+  const ModernPlace = (google.maps.places as unknown as { Place?: typeof google.maps.places.Place }).Place;
+  let modern: Place | null = null;
+  if (ModernPlace) {
+    try { modern = await hydrateModernPlace(ModernPlace, savedPlace, userPosition); }
+    catch { /* Legacy Places can still recover details for this place ID. */ }
+  }
+  if (modern && hasCompletePlaceDetails(modern)) return modern;
+  try {
+    const legacy = toSavedLegacyPlace(await fetchLegacyPlaceDetails(savedPlace.placeId), savedPlace.destination ?? 'Madri', savedPlace.note, savedPlace.id, userPosition);
+    return modern ? mergePlaceDetails(modern, legacy) : legacy;
+  } catch (error) {
+    if (modern) return modern;
+    throw error;
+  }
+}
+
+async function hydratePrediction(prediction: SearchPrediction, destination: string, userPosition: google.maps.LatLngLiteral | null) {
+  let modern: Place | null = null;
+  if (prediction.modern) {
+    try { modern = await hydrateModernPlaceFromPrediction(prediction.modern, destination, userPosition); }
+    catch { /* Fall back to legacy Place Details using the same official place_id. */ }
+  }
+  if (modern && hasCompletePlaceDetails(modern)) return modern;
+  try {
+    const legacy = toSavedLegacyPlace(await fetchLegacyPlaceDetails(prediction.placeId), destination, '', `${prediction.placeId}-${destination}`, userPosition);
+    return modern ? mergePlaceDetails(modern, legacy) : legacy;
+  } catch (error) {
+    if (modern) return modern;
+    throw error;
+  }
+}
+
+function hasCompletePlaceDetails(place: Place) {
+  return Boolean(place.name && place.name !== 'Lugar sem nome' && place.address && place.address !== 'Endereço não informado' && place.lat != null && place.lng != null && place.photo && place.hours !== 'Consulte o Google Maps');
+}
+
+function mergePlaceDetails(preferred: Place, fallback: Place): Place {
+  const preferredHasHours = preferred.hours !== 'Consulte o Google Maps' && preferred.statusLabel !== 'Horário não informado';
+  return {
+    ...fallback,
+    ...preferred,
+    name: preferred.name !== 'Lugar sem nome' ? preferred.name : fallback.name,
+    category: preferred.category !== 'Lugar' ? preferred.category : fallback.category,
+    address: preferred.address !== 'Endereço não informado' ? preferred.address : fallback.address,
+    hours: preferredHasHours ? preferred.hours : fallback.hours,
+    status: preferredHasHours ? preferred.status : fallback.status,
+    statusLabel: preferredHasHours ? preferred.statusLabel : fallback.statusLabel,
+    photo: preferred.photo || fallback.photo,
+    photoAttribution: preferred.photoAttribution ?? fallback.photoAttribution,
+    googleMapsURI: preferred.googleMapsURI || fallback.googleMapsURI,
+    lat: preferred.lat ?? fallback.lat,
+    lng: preferred.lng ?? fallback.lng,
+    rating: preferred.rating !== '—' ? preferred.rating : fallback.rating,
+  };
+}
+
 function fetchLegacyPlaceDetails(placeId: string) {
   return new Promise<google.maps.places.PlaceResult>((resolve, reject) => {
     const service = new google.maps.places.PlacesService(document.createElement('div'));
     service.getDetails({
       placeId,
-      fields: ['place_id', 'name', 'formatted_address', 'geometry', 'opening_hours', 'photos', 'rating', 'types', 'utc_offset_minutes'],
+      fields: ['place_id', 'name', 'formatted_address', 'geometry', 'opening_hours', 'photos', 'rating', 'types', 'utc_offset_minutes', 'url', 'business_status'],
     }, (result, status) => {
       if (status === google.maps.places.PlacesServiceStatus.OK && result) resolve(result);
       else reject(new Error('O Google Places não conseguiu carregar os dados deste lugar.'));
@@ -585,7 +713,7 @@ function toSavedLegacyPlace(result: google.maps.places.PlaceResult, destination:
     distance: location && userPosition ? formatDistance(haversineMeters(userPosition, location)) : '—',
     photo: photo?.getUrl({ maxWidth: 1200, maxHeight: 800 }) || '', photoAttribution: attribution,
     x: 50, y: 50, rating: result.rating?.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) || '—',
-    lat: location?.lat, lng: location?.lng,
+    lat: location?.lat, lng: location?.lng, googleMapsURI: result.url,
   };
 }
 
@@ -642,7 +770,7 @@ function toSavedPlace(livePlace: google.maps.places.Place, destination: string, 
     photo: photo?.getURI({ maxWidth: 1200, maxHeight: 800 }) || '',
     photoAttribution: attribution?.uri ? { name: attribution.displayName, url: attribution.uri } : undefined,
     x: 50, y: 50, rating: livePlace.rating?.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) || '—',
-    lat: location?.lat, lng: location?.lng,
+    lat: location?.lat, lng: location?.lng, googleMapsURI: livePlace.googleMapsURI ?? undefined,
   };
 }
 
