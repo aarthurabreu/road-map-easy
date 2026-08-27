@@ -85,6 +85,7 @@ export default function Home() {
   const [onlyOpen, setOnlyOpen] = useState(false);
   const [routeOpen, setRouteOpen] = useState(false);
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
+  const [mapPendingDelete, setMapPendingDelete] = useState<string | null>(null);
   const [mapsOpen, setMapsOpen] = useState(false);
   const [addPlaceOpen, setAddPlaceOpen] = useState(false);
   const [newMapName, setNewMapName] = useState('');
@@ -175,8 +176,14 @@ export default function Home() {
     return places.filter((place) => {
       const matches = !normalized || `${place.name} ${place.category} ${place.address}`.toLocaleLowerCase('pt-BR').includes(normalized);
       return (place.destination ?? 'Madri') === currentMap && matches && (!onlyOpen || place.status === 'open');
+    }).sort((a, b) => {
+      const aDistance = sortableDistance(a, userPosition);
+      const bDistance = sortableDistance(b, userPosition);
+      if (!Number.isFinite(aDistance) && Number.isFinite(bDistance)) return 1;
+      if (Number.isFinite(aDistance) && !Number.isFinite(bDistance)) return -1;
+      return aDistance !== bDistance ? aDistance - bDistance : a.name.localeCompare(b.name, 'pt-BR');
     });
-  }, [places, query, onlyOpen, currentMap, mapsStatus]);
+  }, [places, query, onlyOpen, currentMap, mapsStatus, userPosition]);
 
   useEffect(() => {
     if (mapsStatus !== 'ready' || query.trim().length < 2) { setPredictions([]); return; }
@@ -311,6 +318,22 @@ export default function Home() {
     setToast(`${selected.name} removido do roteiro`);
   }
 
+  function deleteMap() {
+    if (!mapPendingDelete || mapPendingDelete === 'Madri') return;
+    const remainingMaps = maps.filter((mapName) => mapName !== mapPendingDelete);
+    const remainingPlaces = places.filter((place) => (place.destination ?? 'Madri') !== mapPendingDelete);
+    setMaps(remainingMaps);
+    setPlaces(remainingPlaces);
+    if (currentMap === mapPendingDelete) {
+      setCurrentMap('Madri');
+      setSelectedId(remainingPlaces.find((place) => (place.destination ?? 'Madri') === 'Madri')?.id ?? '');
+    }
+    setRouteOpen(false);
+    setRemoveConfirmOpen(false);
+    setToast(`Mapa “${mapPendingDelete}” excluído`);
+    setMapPendingDelete(null);
+  }
+
   function connectGoogleMaps(key: string) {
     const cleanKey = key.trim();
     if (!cleanKey) return;
@@ -374,7 +397,7 @@ export default function Home() {
       <section className="workspace">
         <aside className="desktop-panel">
           <div className="panel-heading">
-            <div><span className="eyebrow">QUARTA, 26 AGO</span><h1>Seu dia em {currentMap}</h1><p>{visiblePlaces.length} lugares · 2,8 km</p></div>
+            <div><span className="eyebrow">QUARTA, 26 AGO</span><h1>Seu roteiro em {currentMap}</h1><p>{visiblePlaces.length} lugares</p></div>
             <button className="small-add" onClick={() => { setAddPlaceOpen(true); window.setTimeout(() => searchInputRef.current?.focus(), 80); }}><Plus size={19} /></button>
           </div>
           <div className="progress-card"><span><Sparkles size={15} /> Bom momento para explorar</span><p>2 lugares estão abertos e perto de você.</p></div>
@@ -405,14 +428,16 @@ export default function Home() {
           <button className={`locate-button ${isLocating ? 'locating' : ''}`} onClick={useMyLocation} aria-label="Centralizar na minha localização" title="Centralizar na minha localização" disabled={mapsStatus !== 'ready'}><LocateFixed size={21} /></button>
 
           <div className="mobile-list">
-            <div className="mobile-list-heading"><div><span className="eyebrow">QUARTA, 26 AGO</span><h2>Seu dia em {currentMap}</h2></div><span>{visiblePlaces.length} lugares</span></div>
+            <div className="mobile-list-heading"><div><span className="eyebrow">QUARTA, 26 AGO</span><h2>Seu roteiro em {currentMap}</h2></div><span>{visiblePlaces.length} lugares</span></div>
             <div className="place-list">{visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selected.id} onSelect={() => setSelectedId(place.id)} />)}</div>
           </div>
 
           {view === 'map' && visiblePlaces.some((place) => place.id === selected.id) && (
             <article className="place-card">
               <button className="close-card" onClick={() => setSelectedId('')} aria-label="Fechar detalhes"><X size={18} /></button>
-              <div className="place-photo" style={{ backgroundImage: `linear-gradient(180deg, transparent 45%, rgba(17,25,21,.62)), url('${selected.photo}')` }}>
+              <div className="place-photo">
+                <span className="photo-placeholder"><MapPin size={30} /></span>
+                {selected.photo && <img src={selected.photo} alt={`Foto de ${selected.name}`} />}
                 <span className={`status-pill ${selected.status}`}><i />{selected.statusLabel}</span><span className="rating"><Star size={13} fill="currentColor" /> {selected.rating}</span>
                 {selected.photoAttribution && <a className="photo-credit" href={selected.photoAttribution.url} target="_blank" rel="noreferrer">Foto: {selected.photoAttribution.name}</a>}
               </div>
@@ -467,11 +492,14 @@ export default function Home() {
           <section className="maps-modal" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Seus mapas">
             <div className="modal-heading"><div><span>SEUS MAPAS</span><h2>Para onde vamos?</h2></div><button onClick={() => setMapsOpen(false)} aria-label="Fechar"><X size={19} /></button></div>
             {maps.map((mapName, index) => (
-              <button key={mapName} className={`map-option ${currentMap === mapName ? 'selected' : ''}`} onClick={() => { setCurrentMap(mapName); setMapsOpen(false); setToast(`Mapa “${mapName}” aberto`); }}>
-                <span className={`map-thumb ${index === 0 ? 'madrid' : 'lisbon'}`}>{mapName.slice(0,3).toUpperCase()}</span>
-                <span><strong>{mapName}</strong><small>{places.filter((place) => (place.destination ?? 'Madri') === mapName).length ? `${places.filter((place) => (place.destination ?? 'Madri') === mapName).length} lugares salvos` : 'Nenhum lugar salvo'}</small></span>
-                {currentMap === mapName && <Check size={19} />}
-              </button>
+              <div className="map-option-row" key={mapName}>
+                <button className={`map-option ${currentMap === mapName ? 'selected' : ''}`} onClick={() => { setCurrentMap(mapName); setMapsOpen(false); setToast(`Mapa “${mapName}” aberto`); }}>
+                  <span className={`map-thumb ${index === 0 ? 'madrid' : 'lisbon'}`}>{mapName.slice(0,3).toUpperCase()}</span>
+                  <span><strong>{mapName}</strong><small>{places.filter((place) => (place.destination ?? 'Madri') === mapName).length ? `${places.filter((place) => (place.destination ?? 'Madri') === mapName).length} lugares salvos` : 'Nenhum lugar salvo'}</small></span>
+                  {currentMap === mapName && <Check size={19} />}
+                </button>
+                {mapName !== 'Madri' && <button className="delete-map-button" onClick={() => setMapPendingDelete(mapName)} aria-label={`Excluir mapa ${mapName}`} title={`Excluir ${mapName}`}><Trash2 size={17} /></button>}
+              </div>
             ))}
             <div className="new-map-form"><label htmlFor="new-map">NOVO DESTINO</label><div><input id="new-map" value={newMapName} onChange={(event) => setNewMapName(event.target.value)} placeholder="Ex.: Roma" onKeyDown={(event) => event.key === 'Enter' && createMap()} /><button onClick={createMap}><Plus size={18} /> Criar mapa</button></div></div>
           </section>
@@ -498,6 +526,15 @@ export default function Home() {
           </section>
         </div>
       )}
+      {mapPendingDelete && (
+        <div className="modal-backdrop map-delete-backdrop" onClick={() => setMapPendingDelete(null)}>
+          <section className="confirm-modal" onClick={(event) => event.stopPropagation()} role="alertdialog" aria-modal="true" aria-labelledby="delete-map-title" aria-describedby="delete-map-description">
+            <span className="confirm-icon"><Trash2 size={23} /></span>
+            <div><span className="eyebrow">EXCLUIR MAPA</span><h2 id="delete-map-title">Excluir {mapPendingDelete}?</h2><p id="delete-map-description">O mapa e todos os locais salvos nele serão removidos deste dispositivo.</p></div>
+            <div className="confirm-actions"><button onClick={() => setMapPendingDelete(null)}>Cancelar</button><button className="confirm-remove" onClick={deleteMap}><Trash2 size={16} /> Excluir mapa</button></div>
+          </section>
+        </div>
+      )}
       {toast && <div className="toast" role="status"><Check size={16} />{toast}</div>}
     </main>
   );
@@ -506,7 +543,7 @@ export default function Home() {
 function PlaceRow({ place, active, onSelect }: { place: Place; active: boolean; onSelect: () => void }) {
   return (
     <button className={`place-row ${active ? 'active' : ''}`} onClick={onSelect}>
-      <span className="row-photo" style={{ backgroundImage: `url('${place.photo}')` }}><i className={place.status} /></span>
+      <span className="row-photo"><MapPin size={19} />{place.photo && <img src={place.photo} alt="" loading="lazy" />}<i className={place.status} /></span>
       <span className="row-copy"><strong>{place.name}</strong><small>{place.category} · {place.distance}</small><em className={place.status}>{place.statusLabel}</em></span>
       <span className={`status-dot ${place.status}`} title={statusCopy[place.status]} />
     </button>
@@ -783,3 +820,10 @@ function haversineMeters(a: google.maps.LatLngLiteral, b: google.maps.LatLngLite
 }
 
 function formatDistance(meters: number) { return meters < 1000 ? `${Math.max(10, Math.round(meters / 10) * 10)} m` : `${(meters / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} km`; }
+
+function sortableDistance(place: Place, userPosition: google.maps.LatLngLiteral | null) {
+  if (userPosition && place.lat != null && place.lng != null) return haversineMeters(userPosition, { lat: place.lat, lng: place.lng });
+  if (place.distance.endsWith(' km')) return Number(place.distance.replace(' km', '').replace('.', '').replace(',', '.')) * 1000;
+  if (place.distance.endsWith(' m')) return Number(place.distance.replace(' m', '').replace('.', ''));
+  return Number.POSITIVE_INFINITY;
+}
