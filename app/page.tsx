@@ -84,6 +84,7 @@ export default function Home() {
   const [filterOpen, setFilterOpen] = useState(false);
   const [onlyOpen, setOnlyOpen] = useState(false);
   const [routeOpen, setRouteOpen] = useState(false);
+  const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
   const [mapsOpen, setMapsOpen] = useState(false);
   const [addPlaceOpen, setAddPlaceOpen] = useState(false);
   const [newMapName, setNewMapName] = useState('');
@@ -250,6 +251,12 @@ export default function Home() {
     if (!userPosition) useMyLocation();
   }
 
+  function openDirections(mode: TravelMode) {
+    const url = getDirectionsUrl(selected, mode, userPosition);
+    setRouteOpen(false);
+    window.location.assign(url);
+  }
+
   function createMap() {
     if (!newMapName.trim()) return;
     const mapName = newMapName.trim();
@@ -287,7 +294,7 @@ export default function Home() {
   }
 
   function removeSelectedPlace() {
-    if (!selected || !window.confirm(`Remover “${selected.name}” deste roteiro?`)) return;
+    if (!selected) return;
     const key = placeKey(selected.placeId, selected.destination ?? 'Madri');
     const remaining = places.filter((place) => placeKey(place.placeId, place.destination ?? 'Madri') !== key);
     setPlaces(remaining);
@@ -300,6 +307,7 @@ export default function Home() {
     } catch { /* The React state still removes the place for this session. */ }
     const nextSelected = remaining.find((place) => (place.destination ?? 'Madri') === currentMap);
     setSelectedId(nextSelected?.id ?? '');
+    setRemoveConfirmOpen(false);
     setRouteOpen(false);
     setToast(`${selected.name} removido do roteiro`);
   }
@@ -415,7 +423,7 @@ export default function Home() {
                 <div className="meta-row"><Clock3 size={16} /><span><strong>{selected.statusLabel}</strong> · Hoje, {selected.hours}</span></div>
                 <label className="note-field"><span>NOTA PESSOAL</span><input value={selected.note} onChange={(event) => saveNote(event.target.value)} /></label>
                 <div className="place-actions">
-                  <button className="remove-place-button" onClick={removeSelectedPlace}><Trash2 size={16} /> Remover</button>
+                  <button className="remove-place-button" onClick={() => setRemoveConfirmOpen(true)}><Trash2 size={16} /> Remover</button>
                   <button className="go-button" onClick={openRouteOptions}><Navigation size={19} fill="currentColor" /> Ir com Maps</button>
                 </div>
               </div>
@@ -436,11 +444,21 @@ export default function Home() {
             <div className="sheet-handle" />
             <div className="sheet-heading"><div><span>ROTA PARA</span><h2>{selected.name}</h2><p>Saindo da sua localização</p></div><button onClick={() => setRouteOpen(false)} aria-label="Fechar"><X size={19} /></button></div>
             <div className="travel-grid">
-              <a href={getDirectionsUrl(selected, 'walking', userPosition)} target="_blank" rel="noreferrer" onClick={() => setRouteOpen(false)}><Footprints size={24} /><strong>A pé</strong><span>Abrir rota</span></a>
-              <a href={getDirectionsUrl(selected, 'driving', userPosition)} target="_blank" rel="noreferrer" onClick={() => setRouteOpen(false)}><Car size={24} /><strong>Carro</strong><span>Abrir rota</span></a>
-              <a href={getDirectionsUrl(selected, 'bicycling', userPosition)} target="_blank" rel="noreferrer" onClick={() => setRouteOpen(false)}><Bike size={24} /><strong>Bicicleta</strong><span>Abrir rota</span></a>
-              <a href={getDirectionsUrl(selected, 'transit', userPosition)} target="_blank" rel="noreferrer" onClick={() => setRouteOpen(false)}><BusFront size={24} /><strong>Transporte</strong><span>Abrir rota</span></a>
+              <button onClick={() => openDirections('walking')}><Footprints size={24} /><strong>A pé</strong><span>Abrir rota</span></button>
+              <button onClick={() => openDirections('driving')}><Car size={24} /><strong>Carro</strong><span>Abrir rota</span></button>
+              <button onClick={() => openDirections('bicycling')}><Bike size={24} /><strong>Bicicleta</strong><span>Abrir rota</span></button>
+              <button onClick={() => openDirections('transit')}><BusFront size={24} /><strong>Transporte</strong><span>Abrir rota</span></button>
             </div><p className="google-note">A rota será aberta no Google Maps.</p>
+          </section>
+        </div>
+      )}
+
+      {removeConfirmOpen && selected && (
+        <div className="modal-backdrop" onClick={() => setRemoveConfirmOpen(false)}>
+          <section className="confirm-modal" onClick={(event) => event.stopPropagation()} role="alertdialog" aria-modal="true" aria-labelledby="remove-place-title" aria-describedby="remove-place-description">
+            <span className="confirm-icon"><Trash2 size={23} /></span>
+            <div><span className="eyebrow">REMOVER DO ROTEIRO</span><h2 id="remove-place-title">Remover {selected.name}?</h2><p id="remove-place-description">O local e a nota pessoal serão retirados deste mapa.</p></div>
+            <div className="confirm-actions"><button onClick={() => setRemoveConfirmOpen(false)}>Cancelar</button><button className="confirm-remove" onClick={removeSelectedPlace}><Trash2 size={16} /> Remover local</button></div>
           </section>
         </div>
       )}
