@@ -248,11 +248,10 @@ export default function Home() {
 
   function openRouteOptions() {
     setRouteOpen(true);
-    if (!userPosition) useMyLocation();
   }
 
   function openDirections(mode: TravelMode) {
-    const url = getDirectionsUrl(selected, mode, userPosition);
+    const url = getDirectionsUrl(selected, mode);
     setRouteOpen(false);
     window.location.assign(url);
   }
@@ -521,7 +520,7 @@ const placeFields = [
 
 type TravelMode = 'walking' | 'driving' | 'bicycling' | 'transit';
 
-function getDirectionsUrl(place: Place, mode: TravelMode, userPosition: google.maps.LatLngLiteral | null) {
+function getDirectionsUrl(place: Place, mode: TravelMode) {
   const params = new URLSearchParams({
     api: '1',
     destination: place.name,
@@ -529,7 +528,6 @@ function getDirectionsUrl(place: Place, mode: TravelMode, userPosition: google.m
     travelmode: mode,
     dir_action: 'navigate',
   });
-  if (userPosition) params.set('origin', `${userPosition.lat},${userPosition.lng}`);
   return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
@@ -650,59 +648,17 @@ async function hydrateModernPlaceFromPrediction(prediction: google.maps.places.P
 
 async function hydratePlaceById(savedPlace: Place, userPosition: google.maps.LatLngLiteral | null) {
   const ModernPlace = (google.maps.places as unknown as { Place?: typeof google.maps.places.Place }).Place;
-  let modern: Place | null = null;
   if (ModernPlace) {
-    try { modern = await hydrateModernPlace(ModernPlace, savedPlace, userPosition); }
-    catch { /* Legacy Places can still recover details for this place ID. */ }
+    return hydrateModernPlace(ModernPlace, savedPlace, userPosition);
   }
-  if (modern && hasCompletePlaceDetails(modern)) return modern;
-  try {
-    const legacy = toSavedLegacyPlace(await fetchLegacyPlaceDetails(savedPlace.placeId), savedPlace.destination ?? 'Madri', savedPlace.note, savedPlace.id, userPosition);
-    return modern ? mergePlaceDetails(modern, legacy) : legacy;
-  } catch (error) {
-    if (modern) return modern;
-    throw error;
-  }
+  return toSavedLegacyPlace(await fetchLegacyPlaceDetails(savedPlace.placeId), savedPlace.destination ?? 'Madri', savedPlace.note, savedPlace.id, userPosition);
 }
 
 async function hydratePrediction(prediction: SearchPrediction, destination: string, userPosition: google.maps.LatLngLiteral | null) {
-  let modern: Place | null = null;
   if (prediction.modern) {
-    try { modern = await hydrateModernPlaceFromPrediction(prediction.modern, destination, userPosition); }
-    catch { /* Fall back to legacy Place Details using the same official place_id. */ }
+    return hydrateModernPlaceFromPrediction(prediction.modern, destination, userPosition);
   }
-  if (modern && hasCompletePlaceDetails(modern)) return modern;
-  try {
-    const legacy = toSavedLegacyPlace(await fetchLegacyPlaceDetails(prediction.placeId), destination, '', `${prediction.placeId}-${destination}`, userPosition);
-    return modern ? mergePlaceDetails(modern, legacy) : legacy;
-  } catch (error) {
-    if (modern) return modern;
-    throw error;
-  }
-}
-
-function hasCompletePlaceDetails(place: Place) {
-  return Boolean(place.name && place.name !== 'Lugar sem nome' && place.address && place.address !== 'Endereço não informado' && place.lat != null && place.lng != null && place.photo && place.hours !== 'Consulte o Google Maps');
-}
-
-function mergePlaceDetails(preferred: Place, fallback: Place): Place {
-  const preferredHasHours = preferred.hours !== 'Consulte o Google Maps' && preferred.statusLabel !== 'Horário não informado';
-  return {
-    ...fallback,
-    ...preferred,
-    name: preferred.name !== 'Lugar sem nome' ? preferred.name : fallback.name,
-    category: preferred.category !== 'Lugar' ? preferred.category : fallback.category,
-    address: preferred.address !== 'Endereço não informado' ? preferred.address : fallback.address,
-    hours: preferredHasHours ? preferred.hours : fallback.hours,
-    status: preferredHasHours ? preferred.status : fallback.status,
-    statusLabel: preferredHasHours ? preferred.statusLabel : fallback.statusLabel,
-    photo: preferred.photo || fallback.photo,
-    photoAttribution: preferred.photoAttribution ?? fallback.photoAttribution,
-    googleMapsURI: preferred.googleMapsURI || fallback.googleMapsURI,
-    lat: preferred.lat ?? fallback.lat,
-    lng: preferred.lng ?? fallback.lng,
-    rating: preferred.rating !== '—' ? preferred.rating : fallback.rating,
-  };
+  return toSavedLegacyPlace(await fetchLegacyPlaceDetails(prediction.placeId), destination, '', `${prediction.placeId}-${destination}`, userPosition);
 }
 
 function fetchLegacyPlaceDetails(placeId: string) {
