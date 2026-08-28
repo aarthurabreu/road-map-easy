@@ -1,5 +1,10 @@
 'use client';
 
+/* State in these effects is synchronized from browser storage, Google Maps and geolocation callbacks. */
+/* eslint-disable react-hooks/set-state-in-effect */
+/* Google Places returns signed, dynamic photo URLs that cannot use a fixed Next Image host allowlist. */
+/* eslint-disable @next/next/no-img-element */
+
 import {
   Bike, BusFront, Car, Check, ChevronDown, Clock3, Compass, Footprints, LocateFixed,
   Map as MapIcon, MapPin, Menu, Navigation, Plus, Search, SlidersHorizontal,
@@ -27,7 +32,7 @@ type SearchPrediction = {
 
 const initialPlaces: Place[] = [
   {
-    id: 'palacio', placeId: 'ChIJpy0369sQQg0R2lMStY3WFgw', name: 'Palácio Real de Madri',
+    id: 'palacio', placeId: 'ChIJwamkfX4oQg0RUUjO1nnsfy4', name: 'Palácio Real de Madri',
     category: 'História & cultura', address: 'C. de Bailén, s/n, Centro, Madrid',
     hours: '10:00 – 19:00', status: 'open', statusLabel: 'Aberto agora', distance: '1,2 km',
     note: 'Comprar ingresso antecipado',
@@ -43,7 +48,7 @@ const initialPlaces: Place[] = [
     x: 64, y: 49, rating: '4,8', lat: 40.413782, lng: -3.692127,
   },
   {
-    id: 'retiro', placeId: 'ChIJv_4a4ZYoQg0R2DJ8JCQx3jk', name: 'Parque El Retiro',
+    id: 'retiro', placeId: 'ChIJe4IR9Z8oQg0RrqMktRYnbJ4', name: 'Parque El Retiro',
     category: 'Parque', address: 'Plaza de la Independencia, 7, Madrid',
     hours: '06:00 – 00:00', status: 'open', statusLabel: 'Aberto agora', distance: '1,6 km',
     note: 'Alugar um barco no lago',
@@ -51,7 +56,7 @@ const initialPlaces: Place[] = [
     x: 78, y: 29, rating: '4,8', lat: 40.41526, lng: -3.68454,
   },
   {
-    id: 'botin', placeId: 'ChIJW7dQGYYoQg0Rql2PUtWg3xw', name: 'Sobrino de Botín',
+    id: 'botin', placeId: 'ChIJ5W0gy3goQg0RztECvkbsm30', name: 'Sobrino de Botín',
     category: 'Restaurante', address: 'C. de Cuchilleros, 17, Centro, Madrid',
     hours: '13:00 – 16:00, 20:00 – 00:00', status: 'closed', statusLabel: 'Abre às 20:00', distance: '950 m',
     note: 'Pedir o cochinillo assado',
@@ -62,11 +67,20 @@ const initialPlaces: Place[] = [
 
 const statusCopy: Record<PlaceStatus, string> = { open: 'Aberto', soon: 'Em breve', closed: 'Fechado' };
 const statusPinColors: Record<PlaceStatus, string> = { open: '#1f7a50', soon: '#e1a43a', closed: '#9a7068' };
-const pinColorChoices = ['#1f7a50', '#e1a43a', '#d65c52', '#2f80da', '#7b61a8'];
+const pinColorChoices = [
+  { color: '#1f7a50', label: 'Verde' }, { color: '#e1a43a', label: 'Amarelo' },
+  { color: '#d65c52', label: 'Vermelho' }, { color: '#2f80da', label: 'Azul' },
+  { color: '#7b61a8', label: 'Roxo' },
+];
 const removedPlacesStorageKey = 'roamly-removed-place-keys';
+const legacyPlaceIds: Record<string, string> = {
+  ChIJpy0369sQQg0R2lMStY3WFgw: 'ChIJwamkfX4oQg0RUUjO1nnsfy4',
+  ChIJv_4a4ZYoQg0R2DJ8JCQx3jk: 'ChIJe4IR9Z8oQg0RrqMktRYnbJ4',
+  ChIJW7dQGYYoQg0Rql2PUtWg3xw: 'ChIJ5W0gy3goQg0RztECvkbsm30',
+};
 
 function placeKey(placeId: string, destination = 'Madri') {
-  return `${placeId}:${destination.trim().toLocaleLowerCase('pt-BR')}`;
+  return `${legacyPlaceIds[placeId] ?? placeId}:${destination.trim().toLocaleLowerCase('pt-BR')}`;
 }
 
 function dedupePlaces(items: Place[]) {
@@ -105,10 +119,12 @@ export default function Home() {
   const [isSearchingGoogle, setIsSearchingGoogle] = useState(false);
   const [liveMap, setLiveMap] = useState<google.maps.Map | null>(null);
   const [userPosition, setUserPosition] = useState<google.maps.LatLngLiteral | null>(null);
+  const [trackLocation, setTrackLocation] = useState(false);
   const [mapPlaceCandidate, setMapPlaceCandidate] = useState<Place | null>(null);
   const [mapPlaceLoading, setMapPlaceLoading] = useState(false);
   const sessionTokenRef = useRef<google.maps.places.AutocompleteSessionToken | null>(null);
   const addingPlaceKeysRef = useRef(new Set<string>());
+  const hydratedPlaceKeysRef = useRef(new Set<string>());
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -118,7 +134,12 @@ export default function Home() {
       const savedMapsRaw = localStorage.getItem('roamly-maps');
       const savedMaps = savedMapsRaw === null ? null : JSON.parse(savedMapsRaw) as string[];
       const savedRefs = JSON.parse(localStorage.getItem('roamly-place-refs') ?? '[]') as Array<{ id: string; placeId: string; destination: string; note?: string; pinColor?: string }>;
-      const removedKeys = new Set(JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[]);
+      const removedKeys = new Set((JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[]).map((key) => {
+        const separator = key.indexOf(':');
+        if (separator < 0) return key;
+        const oldPlaceId = key.slice(0, separator);
+        return `${legacyPlaceIds[oldPlaceId] ?? oldPlaceId}${key.slice(separator)}`;
+      }));
       if (Array.isArray(savedMaps)) {
         const restoredMaps = Array.from(new Set(savedMaps));
         const savedCurrentMap = localStorage.getItem('roamly-current-map');
@@ -175,16 +196,32 @@ export default function Home() {
   }, [apiKey]);
 
   useEffect(() => {
-    if (mapsStatus !== 'ready') return;
+    if (mapsStatus !== 'ready' || !storageReady || !currentMap) return;
     let cancelled = false;
-    Promise.allSettled(places.map(async (savedPlace) => {
+    const candidates = places.filter((place) => {
+      const key = placeKey(place.placeId, place.destination ?? 'Madri');
+      if ((place.destination ?? 'Madri') !== currentMap || hydratedPlaceKeysRef.current.has(key)) return false;
+      hydratedPlaceKeysRef.current.add(key);
+      return true;
+    });
+    Promise.allSettled(candidates.map(async (savedPlace) => {
       const hydrated = await hydratePlaceById(savedPlace, userPosition);
-      if (!cancelled) setPlaces((current) => dedupePlaces(current.map((item) => item.id === savedPlace.id ? { ...hydrated, note: item.note, pinColor: item.pinColor } : item)));
-    }));
+      if (!cancelled) setPlaces((current) => dedupePlaces(current.map((item) => item.id === savedPlace.id ? {
+        ...hydrated,
+        note: item.note,
+        pinColor: item.pinColor,
+        photo: hydrated.photo || item.photo,
+        photoAttribution: hydrated.photoAttribution || item.photoAttribution,
+      } : item)));
+    })).then((results) => {
+      if (cancelled) return;
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failure) setToast(formatGoogleError(failure.reason));
+    });
     return () => { cancelled = true; };
-    // Refresh once after the official Google APIs become available.
+    // Refresh only the active itinerary once per browser session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapsStatus]);
+  }, [mapsStatus, storageReady, currentMap]);
 
   const visiblePlaces = useMemo(() => {
     const normalized = mapsStatus === 'ready' ? '' : query.trim().toLocaleLowerCase('pt-BR');
@@ -199,6 +236,15 @@ export default function Home() {
       return aDistance !== bDistance ? aDistance - bDistance : a.name.localeCompare(b.name, 'pt-BR');
     });
   }, [places, query, onlyOpen, currentMap, mapsStatus, userPosition]);
+
+  const todayLabel = useMemo(() => formatDateLabel(new Date()), []);
+  const openPlacesCount = visiblePlaces.filter((place) => place.status === 'open').length;
+  const soonPlacesCount = visiblePlaces.filter((place) => place.status === 'soon').length;
+
+  useEffect(() => {
+    if (visiblePlaces.some((place) => place.id === selectedId)) return;
+    setSelectedId(visiblePlaces[0]?.id ?? '');
+  }, [selectedId, visiblePlaces]);
 
   useEffect(() => {
     if (mapsStatus !== 'ready' || query.trim().length < 2) { setPredictions([]); return; }
@@ -229,7 +275,7 @@ export default function Home() {
           if (!cancelled) { setPredictions([]); setMapsError('Habilite a Places API no Google Cloud para buscar e adicionar novos locais.'); }
         }
       } catch (error) {
-        if (!cancelled) { setPredictions([]); setMapsError(error instanceof Error ? error.message : 'A busca do Google Places não respondeu.'); }
+        if (!cancelled) { setPredictions([]); setMapsError(formatGoogleError(error)); }
       } finally { if (!cancelled) setIsSearchingGoogle(false); }
     }, 280);
     return () => { cancelled = true; window.clearTimeout(timer); };
@@ -265,11 +311,12 @@ export default function Home() {
       return;
     }
     if (!navigator.geolocation) { setToast('Localização não disponível neste dispositivo'); return; }
+    setTrackLocation(true);
     setIsLocating(true);
     setLocationLabel('Localizando…');
     navigator.geolocation.getCurrentPosition(
       (position) => { const next = { lat: position.coords.latitude, lng: position.coords.longitude }; setUserPosition(next); liveMap?.panTo(next); liveMap?.setZoom(16); setLocationLabel('Localização ao vivo'); setIsLocating(false); setToast('Mapa centralizado na sua localização'); },
-      () => { setLocationLabel('Localização indisponível'); setIsLocating(false); setToast('Permita o acesso à localização para centralizar o mapa'); },
+      () => { setTrackLocation(false); setLocationLabel('Localização indisponível'); setIsLocating(false); setToast('Permita o acesso à localização para centralizar o mapa'); },
       { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 },
     );
   }
@@ -287,9 +334,32 @@ export default function Home() {
   function createMap() {
     if (!newMapName.trim()) return;
     const mapName = newMapName.trim();
-    if (!maps.includes(mapName)) setMaps((current) => [...current, mapName]);
+    const existingMap = maps.find((item) => item.localeCompare(mapName, 'pt-BR', { sensitivity: 'base' }) === 0);
+    if (existingMap) {
+      openMap(existingMap);
+      setToast(`Mapa “${existingMap}” já existia e foi aberto`);
+    } else {
+      setMaps((current) => [...current, mapName]);
+      setCurrentMap(mapName);
+      setSelectedId('');
+      setView('map');
+      setToast(`Mapa “${mapName}” criado`);
+      setMapsOpen(false);
+    }
+    setNewMapName('');
+  }
+
+  function openMap(mapName: string) {
+    const firstPlace = places.find((place) => (place.destination ?? 'Madri') === mapName);
     setCurrentMap(mapName);
-    setToast(`Mapa “${mapName}” criado`); setNewMapName(''); setMapsOpen(false);
+    setSelectedId(firstPlace?.id ?? '');
+    setView('map');
+    setMapsOpen(false);
+    if (firstPlace?.lat != null && firstPlace.lng != null) {
+      liveMap?.panTo({ lat: firstPlace.lat, lng: firstPlace.lng });
+      liveMap?.setZoom(14);
+    }
+    setToast(`Mapa “${mapName}” aberto`);
   }
 
   async function selectGooglePrediction(prediction: SearchPrediction) {
@@ -298,6 +368,7 @@ export default function Home() {
     const existing = places.find((item) => placeKey(item.placeId, item.destination ?? 'Madri') === key);
     if (existing) {
       setSelectedId(existing.id); setQuery(''); setPredictions([]);
+      setView('map');
       if (existing.lat != null && existing.lng != null) { liveMap?.panTo({ lat: existing.lat, lng: existing.lng }); liveMap?.setZoom(16); }
       setToast(`${existing.name} já está neste roteiro`);
       return;
@@ -307,17 +378,19 @@ export default function Home() {
     setIsSearchingGoogle(true);
     try {
       const savedPlace = await hydratePrediction(prediction, currentMap, userPosition);
+      hydratedPlaceKeysRef.current.add(key);
       setPlaces((current) => dedupePlaces([...current, savedPlace]));
       try {
         const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
         localStorage.setItem(removedPlacesStorageKey, JSON.stringify(removed.filter((removedKey) => removedKey !== key)));
       } catch { /* A fresh save can continue if old local preferences are malformed. */ }
       setSelectedId(savedPlace.id); setQuery(''); setPredictions([]);
+      setView('map');
       sessionTokenRef.current = null;
       if (savedPlace.lat != null && savedPlace.lng != null) { liveMap?.panTo({ lat: savedPlace.lat, lng: savedPlace.lng }); liveMap?.setZoom(16); }
       setToast(`${savedPlace.name} salvo pelo Google Places`);
     } catch (error) {
-      setToast(error instanceof Error ? error.message : 'Não foi possível salvar este lugar');
+      setToast(formatGoogleError(error));
     } finally { addingPlaceKeysRef.current.delete(key); setIsSearchingGoogle(false); }
   }
 
@@ -341,7 +414,7 @@ export default function Home() {
       const hydrated = await hydratePlaceById(draft, userPosition);
       setMapPlaceCandidate(hydrated);
     } catch (error) {
-      setToast(error instanceof Error ? error.message : 'Não foi possível carregar este lugar');
+      setToast(formatGoogleError(error));
     } finally {
       setMapPlaceLoading(false);
     }
@@ -361,6 +434,7 @@ export default function Home() {
       return;
     }
     setPlaces((current) => dedupePlaces([...current, mapPlaceCandidate]));
+    hydratedPlaceKeysRef.current.add(key);
     try {
       const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
       localStorage.setItem(removedPlacesStorageKey, JSON.stringify(removed.filter((removedKey) => removedKey !== key)));
@@ -450,7 +524,7 @@ export default function Home() {
             <div className="google-results" role="listbox" aria-label="Resultados do Google Maps">
               {predictions.map((prediction) => {
                 const saved = places.some((item) => placeKey(item.placeId, item.destination ?? 'Madri') === placeKey(prediction.placeId, currentMap));
-                return <button key={prediction.placeId} onClick={() => !saved && selectGooglePrediction(prediction)} role="option" disabled={saved} aria-disabled={saved}>
+                return <button key={prediction.placeId} onClick={() => !saved && selectGooglePrediction(prediction)} role="option" disabled={saved} aria-disabled={saved} aria-selected={saved}>
                   <span className="result-pin"><MapPin size={16} /></span>
                   <span><strong>{prediction.mainText}</strong><small>{prediction.secondaryText}</small></span>
                   {saved ? <em className="saved-result"><Check size={13} /> Salvo</em> : prediction.distanceMeters != null && <em>{formatDistance(prediction.distanceMeters)}</em>}
@@ -467,7 +541,7 @@ export default function Home() {
         </button>
         {filterOpen && (
           <div className="filter-popover">
-            <div><strong>Mostrar no mapa</strong><span>{visiblePlaces.length} lugares</span></div>
+            <div><strong>Mostrar no mapa</strong><span>{placesCountLabel(visiblePlaces.length)}</span></div>
             <button onClick={() => setOnlyOpen((value) => !value)}>
               <span className={`checkbox ${onlyOpen ? 'checked' : ''}`}>{onlyOpen && <Check size={13} />}</span>
               Somente abertos agora
@@ -479,13 +553,14 @@ export default function Home() {
       <section className="workspace">
         <aside className="desktop-panel">
           <div className="panel-heading">
-            <div><span className="eyebrow">QUARTA, 26 AGO</span><h1>{currentMap ? `Seu roteiro em ${currentMap}` : 'Crie seu primeiro roteiro'}</h1><p>{visiblePlaces.length} lugares</p></div>
+            <div><span className="eyebrow">{todayLabel}</span><h1>{currentMap ? `Seu roteiro em ${currentMap}` : 'Crie seu primeiro roteiro'}</h1><p>{placesCountLabel(visiblePlaces.length)}</p></div>
           </div>
-          <div className="progress-card"><span><Sparkles size={15} /> Bom momento para explorar</span><p>2 lugares estão abertos e perto de você.</p></div>
+          {currentMap && visiblePlaces.length > 0 && <div className="progress-card"><span><Sparkles size={15} /> {openPlacesCount > 0 ? 'Bom momento para explorar' : 'Planeje a próxima parada'}</span><p>{exploreSummary(openPlacesCount, soonPlacesCount)}</p><div className="status-summary"><span><i className="open" />{openPlacesCount} {openPlacesCount === 1 ? 'aberto' : 'abertos'}</span><span><i className="soon" />{soonPlacesCount} em breve</span></div></div>}
           <div className="place-list desktop-list">
             {visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selected.id} onSelect={() => setSelectedId(place.id)} />)}
           </div>
-          <button className="add-place-button" onClick={() => { setQuery(''); searchInputRef.current?.focus(); }}><Plus size={18} /> Adicionar pelo Google Maps</button>
+          {currentMap && visiblePlaces.length === 0 && <div className="panel-empty"><MapPin size={22} /><strong>Seu roteiro está vazio</strong><span>Busque um lugar ou toque em um ponto do mapa.</span></div>}
+          <button className="add-place-button" onClick={() => currentMap ? (setQuery(''), searchInputRef.current?.focus()) : setMapsOpen(true)}><Plus size={18} /> {currentMap ? 'Adicionar pelo Google Maps' : 'Criar primeiro mapa'}</button>
         </aside>
 
         <div className={`map-area ${view === 'list' ? 'mobile-list-view' : ''}`}>
@@ -501,9 +576,9 @@ export default function Home() {
                 <span>{place.category === 'Restaurante' ? 'R' : place.category === 'Parque' ? 'P' : '◆'}</span>
               </button>
             ))}
-            {visiblePlaces.length === 0 && <div className="empty-map"><Search size={24} /><strong>Nenhum lugar encontrado</strong><span>Tente buscar outro nome ou remover os filtros.</span></div>}
+            {visiblePlaces.length === 0 && <div className="empty-map"><Search size={24} /><strong>{currentMap ? 'Nenhum lugar encontrado' : 'Crie seu primeiro mapa'}</strong><span>{currentMap ? 'Busque um lugar ou remova os filtros.' : 'Organize os locais da sua próxima viagem.'}</span></div>}
           </div>
-          {mapsStatus === 'ready' && <LiveGoogleMap places={visiblePlaces} selectedId={selectedId} onSelect={setSelectedId} onMapPlaceClick={selectPlaceFromMap} onUserPosition={setUserPosition} onMapReady={setLiveMap} />}
+          {mapsStatus === 'ready' && <LiveGoogleMap places={visiblePlaces} selectedId={selectedId} onSelect={setSelectedId} onMapPlaceClick={selectPlaceFromMap} onUserPosition={setUserPosition} onMapReady={setLiveMap} trackUser={trackLocation} />}
           {mapsStatus !== 'ready' && <MapsConnection status={mapsStatus} error={mapsError} onConnect={connectGoogleMaps} />}
           {mapsStatus === 'ready' && <div className="map-add-hint"><Plus size={15} /> Toque em um local do mapa para adicionar</div>}
           {mapPlaceLoading && <div className="maps-connect-card compact map-place-loading"><span className="search-spinner" /><strong>Carregando local…</strong></div>}
@@ -511,8 +586,9 @@ export default function Home() {
           <button className={`locate-button ${isLocating ? 'locating' : ''}`} onClick={useMyLocation} aria-label="Centralizar na minha localização" title="Centralizar na minha localização" disabled={mapsStatus !== 'ready'}><LocateFixed size={21} /></button>
 
           <div className="mobile-list">
-            <div className="mobile-list-heading"><div><span className="eyebrow">QUARTA, 26 AGO</span><h2>{currentMap ? `Seu roteiro em ${currentMap}` : 'Crie seu primeiro roteiro'}</h2></div><span>{visiblePlaces.length} lugares</span></div>
-            <div className="place-list">{visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selected.id} onSelect={() => setSelectedId(place.id)} />)}</div>
+            <div className="mobile-list-heading"><div><span className="eyebrow">{todayLabel}</span><h2>{currentMap ? `Seu roteiro em ${currentMap}` : 'Crie seu primeiro roteiro'}</h2></div><span>{placesCountLabel(visiblePlaces.length)}</span></div>
+            <div className="place-list">{visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selected.id} onSelect={() => { setSelectedId(place.id); setView('map'); }} />)}</div>
+            {visiblePlaces.length === 0 && <div className="panel-empty mobile-empty"><MapPin size={22} /><strong>Nenhum lugar neste roteiro</strong><span>Volte ao mapa e use a busca para adicionar.</span></div>}
           </div>
 
           {view === 'map' && visiblePlaces.some((place) => place.id === selected.id) && (
@@ -530,7 +606,7 @@ export default function Home() {
                 <div className="meta-row"><Clock3 size={16} /><span><strong>{selected.statusLabel}</strong> · Hoje, {selected.hours}</span></div>
                 <div className="pin-color-picker"><span>COR DO PIN</span><div role="group" aria-label="Escolher cor do pin">
                   <button className={!selected.pinColor ? 'active auto-color' : 'auto-color'} onClick={() => savePinColor(undefined)} aria-label="Usar cor automática pelo horário" title="Cor automática pelo horário"><Sparkles size={13} /></button>
-                  {pinColorChoices.map((color) => <button key={color} className={selected.pinColor === color ? 'active' : ''} style={{ '--choice-color': color } as React.CSSProperties} onClick={() => savePinColor(color)} aria-label={`Usar a cor ${color}`} />)}
+                  {pinColorChoices.map(({ color, label }) => <button key={color} className={selected.pinColor === color ? 'active' : ''} style={{ '--choice-color': color } as React.CSSProperties} onClick={() => savePinColor(color)} aria-label={`Usar pin ${label.toLocaleLowerCase('pt-BR')}`} title={label} />)}
                 </div></div>
                 <label className="note-field"><span>NOTA PESSOAL</span><input value={selected.note} onChange={(event) => saveNote(event.target.value)} /></label>
                 <div className="place-actions">
@@ -581,9 +657,9 @@ export default function Home() {
             {maps.length === 0 && <div className="places-unavailable maps-empty"><MapIcon size={23} /><strong>Nenhum mapa criado</strong><span>Crie um destino abaixo para começar seu roteiro.</span></div>}
             {maps.map((mapName, index) => (
               <div className="map-option-row" key={mapName}>
-                <button className={`map-option ${currentMap === mapName ? 'selected' : ''}`} onClick={() => { setCurrentMap(mapName); setMapsOpen(false); setToast(`Mapa “${mapName}” aberto`); }}>
+                <button className={`map-option ${currentMap === mapName ? 'selected' : ''}`} onClick={() => openMap(mapName)}>
                   <span className={`map-thumb ${index === 0 ? 'madrid' : 'lisbon'}`}>{mapName.slice(0,3).toUpperCase()}</span>
-                  <span><strong>{mapName}</strong><small>{places.filter((place) => (place.destination ?? 'Madri') === mapName).length ? `${places.filter((place) => (place.destination ?? 'Madri') === mapName).length} lugares salvos` : 'Nenhum lugar salvo'}</small></span>
+                  <span><strong>{mapName}</strong><small>{savedPlacesLabel(places.filter((place) => (place.destination ?? 'Madri') === mapName).length)}</small></span>
                   {currentMap === mapName && <Check size={19} />}
                 </button>
                 <button className="delete-map-button" onClick={() => setMapPendingDelete(mapName)} aria-label={`Excluir mapa ${mapName}`} title={`Excluir ${mapName}`}><Trash2 size={17} /></button>
@@ -631,8 +707,8 @@ function PlaceRow({ place, active, onSelect }: { place: Place; active: boolean; 
 }
 
 const placeFields = [
-  'id', 'displayName', 'formattedAddress', 'location', 'viewport', 'primaryTypeDisplayName',
-  'rating', 'photos', 'currentOpeningHours', 'regularOpeningHours', 'utcOffsetMinutes', 'googleMapsURI', 'businessStatus',
+  'id', 'displayName', 'formattedAddress', 'location', 'primaryType', 'primaryTypeDisplayName',
+  'rating', 'photos', 'currentOpeningHours', 'regularOpeningHours', 'utcOffsetMinutes',
 ];
 
 type TravelMode = 'walking' | 'driving' | 'bicycling' | 'transit';
@@ -671,12 +747,13 @@ function loadGoogleMaps(apiKey: string) {
 }
 
 function LiveGoogleMap({
-  places, selectedId, onSelect, onMapPlaceClick, onUserPosition, onMapReady,
+  places, selectedId, onSelect, onMapPlaceClick, onUserPosition, onMapReady, trackUser,
 }: {
   places: Place[]; selectedId: string; onSelect: (id: string) => void;
   onMapPlaceClick: (placeId: string) => void;
   onUserPosition: (position: google.maps.LatLngLiteral) => void;
   onMapReady: (map: google.maps.Map) => void;
+  trackUser: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
@@ -728,7 +805,7 @@ function LiveGoogleMap({
   }, [selectedId, places]);
 
   useEffect(() => {
-    if (!navigator.geolocation || !mapRef.current) return;
+    if (!trackUser || !navigator.geolocation || !mapRef.current) return;
     const watchId = navigator.geolocation.watchPosition((position) => {
       const next = { lat: position.coords.latitude, lng: position.coords.longitude };
       onUserPosition(next);
@@ -741,7 +818,7 @@ function LiveGoogleMap({
       } else userMarkerRef.current.position = next;
     }, () => undefined, { enableHighAccuracy: true, maximumAge: 5000, timeout: 12000 });
     return () => navigator.geolocation.clearWatch(watchId);
-  }, [onUserPosition]);
+  }, [onUserPosition, trackUser]);
 
   return <div ref={containerRef} className="live-google-map" aria-label="Mapa ao vivo do Google Maps" />;
 }
@@ -843,7 +920,12 @@ function getLegacySchedule(openingHours: google.maps.places.PlaceOpeningHours | 
 
 function formatPlaceType(type?: string) {
   if (!type) return 'Lugar';
-  const known: Record<string, string> = { restaurant: 'Restaurante', museum: 'Museu', park: 'Parque', tourist_attraction: 'Atração', lodging: 'Hotel', cafe: 'Café', bar: 'Bar', store: 'Loja' };
+  const known: Record<string, string> = {
+    restaurant: 'Restaurante', spanish_restaurant: 'Restaurante espanhol', museum: 'Museu', art_museum: 'Museu de arte', park: 'Parque',
+    tourist_attraction: 'Atração', historical_landmark: 'Marco histórico', lodging: 'Hotel',
+    hotel: 'Hotel', cafe: 'Café', bar: 'Bar', store: 'Loja', shopping_mall: 'Shopping',
+    church: 'Igreja', castle: 'Castelo', garden: 'Jardim', performing_arts_theater: 'Teatro', stadium: 'Estádio',
+  };
   return known[type] || type.replaceAll('_', ' ').replace(/^./, (letter) => letter.toUpperCase());
 }
 
@@ -863,7 +945,7 @@ function toSavedPlace(livePlace: google.maps.places.Place, destination: string, 
   return {
     id, placeId: livePlace.id, destination, note,
     name: livePlace.displayName || 'Lugar sem nome',
-    category: livePlace.primaryTypeDisplayName || 'Lugar',
+    category: livePlace.primaryType ? formatPlaceType(livePlace.primaryType) : livePlace.primaryTypeDisplayName || 'Lugar',
     address: livePlace.formattedAddress || 'Endereço não informado',
     hours: schedule.hours, status: schedule.status, statusLabel: schedule.label,
     distance: location && userPosition ? formatDistance(haversineMeters(userPosition, location)) : '—',
@@ -918,3 +1000,36 @@ function sortableDistance(place: Place, userPosition: google.maps.LatLngLiteral 
 }
 
 function getPinColor(place: Place) { return place.pinColor || statusPinColors[place.status]; }
+
+function placesCountLabel(count: number) { return `${count} ${count === 1 ? 'lugar' : 'lugares'}`; }
+
+function savedPlacesLabel(count: number) {
+  if (count === 0) return 'Nenhum lugar salvo';
+  return `${count} ${count === 1 ? 'lugar salvo' : 'lugares salvos'}`;
+}
+
+function exploreSummary(openCount: number, soonCount: number) {
+  if (openCount === 0 && soonCount === 0) return 'Confira os horários antes de sair.';
+  const openLabel = `${openCount} ${openCount === 1 ? 'lugar aberto' : 'lugares abertos'}`;
+  if (soonCount > 0) return `${openLabel} e ${soonCount} com mudança de horário em breve.`;
+  return `${openLabel} para visitar agora.`;
+}
+
+function formatDateLabel(date: Date) {
+  return new Intl.DateTimeFormat('pt-BR', { weekday: 'long', day: '2-digit', month: 'short' })
+    .format(date).replace('.', '').toLocaleUpperCase('pt-BR');
+}
+
+function formatGoogleError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  if (/RESOURCE_EXHAUSTED|quota exceeded|GetPlaceRequest/i.test(message)) {
+    return 'Limite diário do Google Places atingido. Seu roteiro salvo continua disponível.';
+  }
+  if (/REQUEST_DENIED|ApiNotActivated|not authorized|referer/i.test(message)) {
+    return 'O Google Places recusou a solicitação. Confira as APIs e as restrições da chave.';
+  }
+  if (/NOT_FOUND|Place ID is no longer valid/i.test(message)) {
+    return 'Um local salvo não existe mais no Google Maps. Mantivemos os dados anteriores no roteiro.';
+  }
+  return message || 'O Google Places não respondeu. Tente novamente em instantes.';
+}
