@@ -20,6 +20,7 @@ type Place = {
   lat?: number; lng?: number; googleMapsURI?: string; photoAttribution?: { name: string; url: string };
   pinColor?: string;
 };
+type StoredPlaceRef = Partial<Place> & Pick<Place, 'id' | 'placeId'> & { destination: string };
 
 type MapsStatus = 'loading' | 'ready' | 'needs-key' | 'error';
 type SearchPrediction = {
@@ -126,6 +127,7 @@ export default function Home() {
   const sessionTokenRef = useRef<google.maps.places.AutocompleteSessionToken | null>(null);
   const addingPlaceKeysRef = useRef(new Set<string>());
   const hydratedPlaceKeysRef = useRef(new Set<string>());
+  const locationRequestedRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -134,7 +136,7 @@ export default function Home() {
       const notes = savedNotes ? JSON.parse(savedNotes) as Record<string, string> : {};
       const savedMapsRaw = localStorage.getItem('roamly-maps');
       const savedMaps = savedMapsRaw === null ? null : JSON.parse(savedMapsRaw) as string[];
-      const savedRefs = JSON.parse(localStorage.getItem('roamly-place-refs') ?? '[]') as Array<{ id: string; placeId: string; destination: string; note?: string; pinColor?: string }>;
+      const savedRefs = JSON.parse(localStorage.getItem('roamly-place-refs') ?? '[]') as StoredPlaceRef[];
       const removedKeys = new Set((JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[]).map((key) => {
         const separator = key.indexOf(':');
         if (separator < 0) return key;
@@ -151,14 +153,24 @@ export default function Home() {
         const savedRefByKey = new Map(savedRefs.map((ref) => [placeKey(ref.placeId, ref.destination), ref]));
         const hydrated = current.map((place) => {
           const savedRef = savedRefByKey.get(placeKey(place.placeId, place.destination ?? 'Madri'));
-          return { ...place, note: notes[place.id] ?? savedRef?.note ?? place.note, pinColor: savedRef?.pinColor ?? place.pinColor };
+          return {
+            ...place,
+            ...savedRef,
+            id: place.id,
+            placeId: place.placeId,
+            destination: place.destination,
+            note: notes[place.id] ?? savedRef?.note ?? place.note,
+            photo: savedRef?.photo || place.photo,
+            pinColor: savedRef?.pinColor ?? place.pinColor,
+          };
         });
         const known = new Set(hydrated.map((place) => placeKey(place.placeId, place.destination ?? 'Madri')));
         const restored = savedRefs.filter((ref) => !known.has(placeKey(ref.placeId, ref.destination))).map((ref, index) => ({
+          ...ref,
           id: ref.id, placeId: ref.placeId, destination: ref.destination, note: ref.note ?? '', pinColor: ref.pinColor,
-          name: 'Carregando lugar…', category: 'Google Places', address: '', hours: 'Consultando horários',
-          status: 'closed' as PlaceStatus, statusLabel: 'Atualizando', distance: '—', photo: '',
-          x: 45 + index * 4, y: 45 + index * 3, rating: '—',
+          name: ref.name ?? 'Carregando lugar…', category: ref.category ?? 'Google Places', address: ref.address ?? '', hours: ref.hours ?? 'Consultando horários',
+          status: ref.status ?? 'closed' as PlaceStatus, statusLabel: ref.statusLabel ?? 'Atualizando', distance: ref.distance ?? '—', photo: ref.photo ?? '',
+          x: ref.x ?? 45 + index * 4, y: ref.y ?? 45 + index * 3, rating: ref.rating ?? '—',
         }));
         return dedupePlaces([...hydrated, ...restored]).filter((place) => !removedKeys.has(placeKey(place.placeId, place.destination ?? 'Madri')));
       });
@@ -170,7 +182,7 @@ export default function Home() {
     if (!storageReady) return;
     localStorage.setItem('roamly-maps', JSON.stringify(maps));
     localStorage.setItem('roamly-current-map', currentMap);
-    localStorage.setItem('roamly-place-refs', JSON.stringify(dedupePlaces(places).map((place) => ({ id: place.id, placeId: place.placeId, destination: place.destination ?? 'Madri', note: place.note, pinColor: place.pinColor }))));
+    localStorage.setItem('roamly-place-refs', JSON.stringify(dedupePlaces(places).map((place) => ({ ...place, destination: place.destination ?? 'Madri' }))));
   }, [maps, places, currentMap, storageReady]);
 
   useEffect(() => {
@@ -195,6 +207,26 @@ export default function Home() {
     });
     return () => { cancelled = true; };
   }, [apiKey]);
+
+  useEffect(() => {
+    if (mapsStatus !== 'ready' || userPosition || locationRequestedRef.current || !navigator.geolocation) return;
+    locationRequestedRef.current = true;
+    setIsLocating(true);
+    setLocationLabel('Calculando distâncias…');
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setUserPosition({ lat: position.coords.latitude, lng: position.coords.longitude });
+        setTrackLocation(true);
+        setLocationLabel('Localização ao vivo');
+        setIsLocating(false);
+      },
+      () => {
+        setLocationLabel('Ative a localização para ver distâncias');
+        setIsLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 12_000, maximumAge: 30_000 },
+    );
+  }, [mapsStatus, userPosition]);
 
   useEffect(() => {
     if (mapsStatus !== 'ready' || !storageReady || !currentMap) return;
@@ -574,7 +606,7 @@ export default function Home() {
           </div>
           {currentMap && visiblePlaces.length > 0 && <div className="progress-card"><span><Sparkles size={15} /> {openPlacesCount > 0 ? 'Bom momento para explorar' : 'Planeje a próxima parada'}</span><p>{exploreSummary(openPlacesCount, soonPlacesCount)}</p><div className="status-summary"><span><i className="open" />{openPlacesCount} {openPlacesCount === 1 ? 'aberto' : 'abertos'}</span><span><i className="soon" />{soonPlacesCount} em breve</span></div></div>}
           <div className="place-list desktop-list">
-            {visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selectedId} onSelect={() => showPlace(place.id)} />)}
+            {visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selectedId} mapsReady={mapsStatus === 'ready'} onSelect={() => showPlace(place.id)} />)}
           </div>
           {currentMap && visiblePlaces.length === 0 && <div className="panel-empty"><MapPin size={22} /><strong>Seu roteiro está vazio</strong><span>Busque um lugar ou toque em um ponto do mapa.</span></div>}
           <button className="add-place-button" onClick={() => currentMap ? (setQuery(''), searchInputRef.current?.focus()) : setMapsOpen(true)}><Plus size={18} /> {currentMap ? 'Adicionar pelo Google Maps' : 'Criar primeiro mapa'}</button>
@@ -603,8 +635,16 @@ export default function Home() {
           <button className={`locate-button ${isLocating ? 'locating' : ''}`} onClick={useMyLocation} aria-label="Centralizar na minha localização" title="Centralizar na minha localização" disabled={mapsStatus !== 'ready'}><LocateFixed size={21} /></button>
 
           <div className="mobile-list">
-            <div className="mobile-list-heading"><div><span className="eyebrow">{todayLabel}</span><h2>{currentMap ? `Seu roteiro em ${currentMap}` : 'Crie seu primeiro roteiro'}</h2></div><span>{placesCountLabel(visiblePlaces.length)}</span></div>
-            <div className="place-list">{visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selectedId} onSelect={() => { showPlace(place.id); setView('map'); }} />)}</div>
+            <div className="mobile-list-heading">
+              <div><span className="eyebrow">{todayLabel}</span><h2>{currentMap ? `Seu roteiro em ${currentMap}` : 'Crie seu primeiro roteiro'}</h2></div>
+              <span>{placesCountLabel(visiblePlaces.length)}</span>
+            </div>
+            {currentMap && visiblePlaces.length > 0 && (
+              userPosition
+                ? <div className="distance-sort-state ready"><Navigation size={13} /> Mais próximos primeiro</div>
+                : <button className="distance-sort-state" onClick={useMyLocation} disabled={isLocating}><LocateFixed size={13} /> {isLocating ? 'Calculando distâncias…' : 'Ativar distância e ordenar'}</button>
+            )}
+            <div className="place-list">{visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selectedId} mapsReady={mapsStatus === 'ready'} onSelect={() => { showPlace(place.id); setView('map'); }} />)}</div>
             {visiblePlaces.length === 0 && <div className="panel-empty mobile-empty"><MapPin size={22} /><strong>Nenhum lugar neste roteiro</strong><span>Volte ao mapa e use a busca para adicionar.</span></div>}
           </div>
 
@@ -714,7 +754,7 @@ export default function Home() {
   );
 }
 
-function GooglePlacePhoto({ placeId, name }: { placeId: string; name: string }) {
+function GooglePlacePhoto({ placeId, name, className = '' }: { placeId: string; name: string; className?: string }) {
   const hostRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -756,14 +796,28 @@ function GooglePlacePhoto({ placeId, name }: { placeId: string; name: string }) 
     };
   }, [name, placeId]);
 
-  return <div ref={hostRef} className="google-place-photo" />;
+  return <div ref={hostRef} className={`google-place-photo ${className}`} />;
 }
 
-function PlaceRow({ place, active, onSelect }: { place: Place; active: boolean; onSelect: () => void }) {
+function PlaceRow({ place, active, mapsReady, onSelect }: { place: Place; active: boolean; mapsReady: boolean; onSelect: () => void }) {
+  const [photoFailed, setPhotoFailed] = useState(false);
+
+  useEffect(() => setPhotoFailed(false), [place.photo, place.placeId]);
+
   return (
     <button className={`place-row ${active ? 'active' : ''}`} onClick={onSelect}>
-      <span className="row-photo"><MapPin size={19} />{place.photo && <img src={place.photo} alt="" loading="lazy" />}<i className={place.status} /></span>
-      <span className="row-copy"><strong>{place.name}</strong><small>{place.category} · {place.distance}</small><em className={place.status}>{place.statusLabel}</em></span>
+      <span className="row-photo">
+        <MapPin size={19} />
+        {place.photo && !photoFailed && <img src={place.photo} alt={`Foto de ${place.name}`} loading="lazy" onError={() => setPhotoFailed(true)} />}
+        {mapsReady && (!place.photo || photoFailed) && <GooglePlacePhoto placeId={place.placeId} name={place.name} className="row-google-photo" />}
+        <i className={place.status} />
+      </span>
+      <span className="row-copy">
+        <strong>{place.name}</strong>
+        <small>{place.category}</small>
+        <span className={`row-distance ${place.distance === '—' ? 'pending' : ''}`}><Navigation size={11} />{place.distance === '—' ? 'Calculando distância' : place.distance}</span>
+        <em className={place.status}>{place.statusLabel}</em>
+      </span>
       <span className={`status-dot ${place.status}`} title={statusCopy[place.status]} />
     </button>
   );
