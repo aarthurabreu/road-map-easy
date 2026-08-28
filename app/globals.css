@@ -141,13 +141,15 @@ button,input { font:inherit; } button { color:inherit; }
 @keyframes lift { from { opacity:0; transform:translateY(12px); } }
 .close-card { position:absolute; z-index:4; top:12px; right:12px; width:34px; height:34px; display:grid; place-items:center; border:0; border-radius:50%; background:rgba(255,255,255,.9); cursor:pointer; }
 .place-photo { min-height:198px; padding:16px; color:#719180; background:linear-gradient(145deg,#e6efe7,#cbdccd); display:flex; align-items:flex-end; gap:8px; position:relative; overflow:hidden; }
-.place-photo::after { content:''; position:absolute; z-index:1; inset:0; background:linear-gradient(180deg,transparent 42%,rgba(17,25,21,.66)); pointer-events:none; }
+.place-photo::after { content:''; position:absolute; z-index:2; inset:0; background:linear-gradient(180deg,transparent 42%,rgba(17,25,21,.66)); pointer-events:none; }
 .place-photo>img { position:absolute; z-index:0; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; }
 .photo-placeholder { position:absolute; inset:0; display:grid; place-items:center; background:radial-gradient(circle at 25% 20%,rgba(255,255,255,.58),transparent 32%),linear-gradient(145deg,#e4eee6,#bbd0c0); }
 .photo-placeholder svg { width:52px; height:52px; padding:14px; border-radius:18px; color:#527863; background:rgba(255,255,255,.42); box-shadow:0 8px 24px rgba(38,78,55,.12); }
-.photo-credit { position:relative; z-index:2; margin-left:auto; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:rgba(255,255,255,.88); font-size:8px; text-decoration:none; text-shadow:0 1px 3px rgba(0,0,0,.8); }
+.google-place-photo { position:absolute; z-index:1; inset:0; overflow:hidden; background:transparent; }
+.google-place-photo>gmp-place-details-compact { min-height:100%; }
+.photo-credit { position:relative; z-index:3; margin-left:auto; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:rgba(255,255,255,.88); font-size:8px; text-decoration:none; text-shadow:0 1px 3px rgba(0,0,0,.8); }
 .status-pill,.rating { display:inline-flex; align-items:center; gap:5px; padding:7px 9px; border-radius:999px; color:#fff; background:rgba(20,37,29,.84); font-size:10px; font-weight:800; backdrop-filter:blur(8px); }
-.status-pill,.rating { position:relative; z-index:2; }
+.status-pill,.rating { position:relative; z-index:3; }
 .status-pill i { width:7px; height:7px; border-radius:50%; background:currentColor; }
 .status-pill.open { color:#bff2d2; } .status-pill.soon { color:#ffe29d; } .status-pill.closed { color:#f3c1bb; }
 .place-content { padding:21px 24px; display:grid; align-content:start; gap:9px; }

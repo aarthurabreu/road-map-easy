@@ -597,6 +597,7 @@ export default function Home() {
               <div className="place-photo">
                 <span className="photo-placeholder"><MapPin size={30} /></span>
                 {selected.photo && <img src={selected.photo} alt={`Foto de ${selected.name}`} />}
+                {mapsStatus === 'ready' && <GooglePlacePhoto placeId={selected.placeId} name={selected.name} />}
                 <span className={`status-pill ${selected.status}`}><i />{selected.statusLabel}</span><span className="rating"><Star size={13} fill="currentColor" /> {selected.rating}</span>
                 {selected.photoAttribution && <a className="photo-credit" href={selected.photoAttribution.url} target="_blank" rel="noreferrer">Foto: {selected.photoAttribution.name}</a>}
               </div>
@@ -694,6 +695,46 @@ export default function Home() {
       {toast && <div className="toast" role="status"><Check size={16} />{toast}</div>}
     </main>
   );
+}
+
+function GooglePlacePhoto({ placeId, name }: { placeId: string; name: string }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !window.google?.maps?.importLibrary) return;
+    let cancelled = false;
+
+    void google.maps.importLibrary('places').then(() => {
+      if (cancelled) return;
+      const details = document.createElement('gmp-place-details-compact');
+      details.setAttribute('orientation', 'vertical');
+      details.setAttribute('truncation-preferred', '');
+      details.setAttribute('aria-label', `Primeira foto de ${name} no Google Maps`);
+      details.style.cssText = 'display:block;width:100%;height:100%;padding:0;margin:0;border:0;background:transparent;color-scheme:light;';
+
+      const request = document.createElement('gmp-place-details-place-request');
+      request.setAttribute('place', placeId);
+      const content = document.createElement('gmp-place-content-config');
+      const media = document.createElement('gmp-place-media');
+      media.setAttribute('preferred-size', 'large');
+      const attribution = document.createElement('gmp-place-attribution');
+      attribution.setAttribute('light-scheme-color', 'white');
+      attribution.setAttribute('dark-scheme-color', 'white');
+      content.appendChild(media);
+      content.appendChild(attribution);
+      details.appendChild(request);
+      details.appendChild(content);
+      host.replaceChildren(details);
+    }).catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      host.replaceChildren();
+    };
+  }, [name, placeId]);
+
+  return <div ref={hostRef} className="google-place-photo" aria-hidden="true" />;
 }
 
 function PlaceRow({ place, active, onSelect }: { place: Place; active: boolean; onSelect: () => void }) {
