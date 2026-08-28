@@ -145,8 +145,11 @@ button,input { font:inherit; } button { color:inherit; }
 .place-photo>img { position:absolute; z-index:0; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; }
 .photo-placeholder { position:absolute; inset:0; display:grid; place-items:center; background:radial-gradient(circle at 25% 20%,rgba(255,255,255,.58),transparent 32%),linear-gradient(145deg,#e4eee6,#bbd0c0); }
 .photo-placeholder svg { width:52px; height:52px; padding:14px; border-radius:18px; color:#527863; background:rgba(255,255,255,.42); box-shadow:0 8px 24px rgba(38,78,55,.12); }
-.google-place-photo { position:absolute; z-index:1; inset:0; overflow:hidden; background:transparent; }
-.google-place-photo>gmp-place-details-compact { min-height:100%; }
+.google-place-photo { position:absolute; z-index:1; inset:0; overflow:hidden; display:grid; place-items:center; background:transparent; }
+.google-place-photo::before { content:'Carregando foto do Maps…'; position:absolute; inset:auto 16px 18px; color:#fff; font-size:10px; font-weight:750; text-align:center; text-shadow:0 1px 4px rgba(0,0,0,.7); }
+.google-place-photo>gmp-place-details-compact { width:100%; min-height:100%; opacity:0; transition:opacity .24s ease; }
+.google-place-photo.loaded>gmp-place-details-compact { opacity:1; }
+.google-place-photo.loaded::before { opacity:0; }
 .photo-credit { position:relative; z-index:3; margin-left:auto; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:rgba(255,255,255,.88); font-size:8px; text-decoration:none; text-shadow:0 1px 3px rgba(0,0,0,.8); }
 .status-pill,.rating { display:inline-flex; align-items:center; gap:5px; padding:7px 9px; border-radius:999px; color:#fff; background:rgba(20,37,29,.84); font-size:10px; font-weight:800; backdrop-filter:blur(8px); }
 .status-pill,.rating { position:relative; z-index:3; }

@@ -96,6 +96,7 @@ function dedupePlaces(items: Place[]) {
 export default function Home() {
   const [places, setPlaces] = useState(initialPlaces);
   const [selectedId, setSelectedId] = useState('prado');
+  const [detailsDismissed, setDetailsDismissed] = useState(false);
   const [view, setView] = useState<'map' | 'list'>('map');
   const [query, setQuery] = useState('');
   const [filterOpen, setFilterOpen] = useState(false);
@@ -242,9 +243,10 @@ export default function Home() {
   const soonPlacesCount = visiblePlaces.filter((place) => place.status === 'soon').length;
 
   useEffect(() => {
+    if (detailsDismissed) return;
     if (visiblePlaces.some((place) => place.id === selectedId)) return;
     setSelectedId(visiblePlaces[0]?.id ?? '');
-  }, [selectedId, visiblePlaces]);
+  }, [detailsDismissed, selectedId, visiblePlaces]);
 
   useEffect(() => {
     if (mapsStatus !== 'ready' || query.trim().length < 2) { setPredictions([]); return; }
@@ -288,6 +290,17 @@ export default function Home() {
   }, [userPosition]);
 
   const selected = places.find((place) => place.id === selectedId) ?? places[0];
+
+  function showPlace(placeId: string) {
+    setSelectedId(placeId);
+    setDetailsDismissed(false);
+  }
+
+  function closePlaceDetails() {
+    setDetailsDismissed(true);
+    setSelectedId('');
+    setRouteOpen(false);
+  }
 
   function saveNote(value: string) {
     const next = places.map((place) => (place.id === selected.id ? { ...place, note: value } : place));
@@ -342,6 +355,7 @@ export default function Home() {
       setMaps((current) => [...current, mapName]);
       setCurrentMap(mapName);
       setSelectedId('');
+      setDetailsDismissed(true);
       setView('map');
       setToast(`Mapa “${mapName}” criado`);
       setMapsOpen(false);
@@ -353,6 +367,7 @@ export default function Home() {
     const firstPlace = places.find((place) => (place.destination ?? 'Madri') === mapName);
     setCurrentMap(mapName);
     setSelectedId(firstPlace?.id ?? '');
+    setDetailsDismissed(false);
     setView('map');
     setMapsOpen(false);
     if (firstPlace?.lat != null && firstPlace.lng != null) {
@@ -367,7 +382,7 @@ export default function Home() {
     const key = placeKey(prediction.placeId, currentMap);
     const existing = places.find((item) => placeKey(item.placeId, item.destination ?? 'Madri') === key);
     if (existing) {
-      setSelectedId(existing.id); setQuery(''); setPredictions([]);
+      showPlace(existing.id); setQuery(''); setPredictions([]);
       setView('map');
       if (existing.lat != null && existing.lng != null) { liveMap?.panTo({ lat: existing.lat, lng: existing.lng }); liveMap?.setZoom(16); }
       setToast(`${existing.name} já está neste roteiro`);
@@ -384,7 +399,7 @@ export default function Home() {
         const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
         localStorage.setItem(removedPlacesStorageKey, JSON.stringify(removed.filter((removedKey) => removedKey !== key)));
       } catch { /* A fresh save can continue if old local preferences are malformed. */ }
-      setSelectedId(savedPlace.id); setQuery(''); setPredictions([]);
+      showPlace(savedPlace.id); setQuery(''); setPredictions([]);
       setView('map');
       sessionTokenRef.current = null;
       if (savedPlace.lat != null && savedPlace.lng != null) { liveMap?.panTo({ lat: savedPlace.lat, lng: savedPlace.lng }); liveMap?.setZoom(16); }
@@ -399,7 +414,7 @@ export default function Home() {
     const key = placeKey(placeId, currentMap);
     const existing = places.find((item) => placeKey(item.placeId, item.destination ?? 'Madri') === key);
     if (existing) {
-      setSelectedId(existing.id);
+      showPlace(existing.id);
       setToast(`${existing.name} já está neste roteiro`);
       return;
     }
@@ -427,7 +442,7 @@ export default function Home() {
     addingPlaceKeysRef.current.add(key);
     const existing = places.find((item) => placeKey(item.placeId, item.destination ?? 'Madri') === key);
     if (existing) {
-      setSelectedId(existing.id);
+      showPlace(existing.id);
       setMapPlaceCandidate(null);
       addingPlaceKeysRef.current.delete(key);
       setToast(`${existing.name} já está neste roteiro`);
@@ -439,7 +454,7 @@ export default function Home() {
       const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
       localStorage.setItem(removedPlacesStorageKey, JSON.stringify(removed.filter((removedKey) => removedKey !== key)));
     } catch { /* A fresh save can continue if old local preferences are malformed. */ }
-    setSelectedId(mapPlaceCandidate.id);
+    showPlace(mapPlaceCandidate.id);
     setMapPlaceCandidate(null);
     addingPlaceKeysRef.current.delete(key);
     setToast(`${mapPlaceCandidate.name} adicionado ao roteiro`);
@@ -459,6 +474,7 @@ export default function Home() {
     } catch { /* The React state still removes the place for this session. */ }
     const nextSelected = remaining.find((place) => (place.destination ?? 'Madri') === currentMap);
     setSelectedId(nextSelected?.id ?? '');
+    setDetailsDismissed(false);
     setRemoveConfirmOpen(false);
     setRouteOpen(false);
     setToast(`${selected.name} removido do roteiro`);
@@ -483,6 +499,7 @@ export default function Home() {
       const nextMap = remainingMaps[0] ?? '';
       setCurrentMap(nextMap);
       setSelectedId(remainingPlaces.find((place) => (place.destination ?? 'Madri') === nextMap)?.id ?? '');
+      setDetailsDismissed(false);
     }
     setRouteOpen(false);
     setRemoveConfirmOpen(false);
@@ -557,7 +574,7 @@ export default function Home() {
           </div>
           {currentMap && visiblePlaces.length > 0 && <div className="progress-card"><span><Sparkles size={15} /> {openPlacesCount > 0 ? 'Bom momento para explorar' : 'Planeje a próxima parada'}</span><p>{exploreSummary(openPlacesCount, soonPlacesCount)}</p><div className="status-summary"><span><i className="open" />{openPlacesCount} {openPlacesCount === 1 ? 'aberto' : 'abertos'}</span><span><i className="soon" />{soonPlacesCount} em breve</span></div></div>}
           <div className="place-list desktop-list">
-            {visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selected.id} onSelect={() => setSelectedId(place.id)} />)}
+            {visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selectedId} onSelect={() => showPlace(place.id)} />)}
           </div>
           {currentMap && visiblePlaces.length === 0 && <div className="panel-empty"><MapPin size={22} /><strong>Seu roteiro está vazio</strong><span>Busque um lugar ou toque em um ponto do mapa.</span></div>}
           <button className="add-place-button" onClick={() => currentMap ? (setQuery(''), searchInputRef.current?.focus()) : setMapsOpen(true)}><Plus size={18} /> {currentMap ? 'Adicionar pelo Google Maps' : 'Criar primeiro mapa'}</button>
@@ -570,15 +587,15 @@ export default function Home() {
             <div className="park park-one" /><div className="park park-two" /><div className="water" />
             <div className="user-location" aria-label="Sua localização"><span /><i /><em>{locationLabel}</em></div>
             {visiblePlaces.map((place) => (
-              <button key={place.id} className={`map-marker ${place.status} ${selected.id === place.id ? 'selected' : ''}`}
-                style={{ left: `${place.x}%`, top: `${place.y}%`, background: getPinColor(place) }} onClick={() => setSelectedId(place.id)}
+              <button key={place.id} className={`map-marker ${place.status} ${selectedId === place.id ? 'selected' : ''}`}
+                style={{ left: `${place.x}%`, top: `${place.y}%`, background: getPinColor(place) }} onClick={() => showPlace(place.id)}
                 aria-label={`${place.name}: ${place.statusLabel}`}>
                 <span>{place.category === 'Restaurante' ? 'R' : place.category === 'Parque' ? 'P' : '◆'}</span>
               </button>
             ))}
             {visiblePlaces.length === 0 && <div className="empty-map"><Search size={24} /><strong>{currentMap ? 'Nenhum lugar encontrado' : 'Crie seu primeiro mapa'}</strong><span>{currentMap ? 'Busque um lugar ou remova os filtros.' : 'Organize os locais da sua próxima viagem.'}</span></div>}
           </div>
-          {mapsStatus === 'ready' && <LiveGoogleMap places={visiblePlaces} selectedId={selectedId} onSelect={setSelectedId} onMapPlaceClick={selectPlaceFromMap} onUserPosition={setUserPosition} onMapReady={setLiveMap} trackUser={trackLocation} />}
+          {mapsStatus === 'ready' && <LiveGoogleMap places={visiblePlaces} selectedId={selectedId} onSelect={showPlace} onMapPlaceClick={selectPlaceFromMap} onUserPosition={setUserPosition} onMapReady={setLiveMap} trackUser={trackLocation} />}
           {mapsStatus !== 'ready' && <MapsConnection status={mapsStatus} error={mapsError} onConnect={connectGoogleMaps} />}
           {mapsStatus === 'ready' && <div className="map-add-hint"><Plus size={15} /> Toque em um local do mapa para adicionar</div>}
           {mapPlaceLoading && <div className="maps-connect-card compact map-place-loading"><span className="search-spinner" /><strong>Carregando local…</strong></div>}
@@ -587,13 +604,13 @@ export default function Home() {
 
           <div className="mobile-list">
             <div className="mobile-list-heading"><div><span className="eyebrow">{todayLabel}</span><h2>{currentMap ? `Seu roteiro em ${currentMap}` : 'Crie seu primeiro roteiro'}</h2></div><span>{placesCountLabel(visiblePlaces.length)}</span></div>
-            <div className="place-list">{visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selected.id} onSelect={() => { setSelectedId(place.id); setView('map'); }} />)}</div>
+            <div className="place-list">{visiblePlaces.map((place) => <PlaceRow key={place.id} place={place} active={place.id === selectedId} onSelect={() => { showPlace(place.id); setView('map'); }} />)}</div>
             {visiblePlaces.length === 0 && <div className="panel-empty mobile-empty"><MapPin size={22} /><strong>Nenhum lugar neste roteiro</strong><span>Volte ao mapa e use a busca para adicionar.</span></div>}
           </div>
 
-          {view === 'map' && visiblePlaces.some((place) => place.id === selected.id) && (
+          {view === 'map' && !detailsDismissed && visiblePlaces.some((place) => place.id === selected.id) && (
             <article className="place-card">
-              <button className="close-card" onClick={() => setSelectedId('')} aria-label="Fechar detalhes"><X size={18} /></button>
+              <button className="close-card" onClick={closePlaceDetails} aria-label="Fechar detalhes" title="Fechar detalhes"><X size={18} /></button>
               <div className="place-photo">
                 <span className="photo-placeholder"><MapPin size={30} /></span>
                 {selected.photo && <img src={selected.photo} alt={`Foto de ${selected.name}`} />}
@@ -704,6 +721,7 @@ function GooglePlacePhoto({ placeId, name }: { placeId: string; name: string }) 
     const host = hostRef.current;
     if (!host || !window.google?.maps?.importLibrary) return;
     let cancelled = false;
+    host.classList.remove('loaded');
 
     void google.maps.importLibrary('places').then(() => {
       if (cancelled) return;
@@ -712,6 +730,9 @@ function GooglePlacePhoto({ placeId, name }: { placeId: string; name: string }) 
       details.setAttribute('truncation-preferred', '');
       details.setAttribute('aria-label', `Primeira foto de ${name} no Google Maps`);
       details.style.cssText = 'display:block;width:100%;height:100%;padding:0;margin:0;border:0;background:transparent;color-scheme:light;';
+      details.addEventListener('gmp-load', () => {
+        if (!cancelled) host.classList.add('loaded');
+      }, { once: true });
 
       const request = document.createElement('gmp-place-details-place-request');
       request.setAttribute('place', placeId);
@@ -730,11 +751,12 @@ function GooglePlacePhoto({ placeId, name }: { placeId: string; name: string }) 
 
     return () => {
       cancelled = true;
+      host.classList.remove('loaded');
       host.replaceChildren();
     };
   }, [name, placeId]);
 
-  return <div ref={hostRef} className="google-place-photo" aria-hidden="true" />;
+  return <div ref={hostRef} className="google-place-photo" />;
 }
 
 function PlaceRow({ place, active, onSelect }: { place: Place; active: boolean; onSelect: () => void }) {
