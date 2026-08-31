@@ -8,9 +8,9 @@
 import {
   Bike, BusFront, Car, Check, ChevronDown, Clock3, Compass, Footprints, LocateFixed,
   Map as MapIcon, MapPin, Menu, Navigation, Plus, Search, SlidersHorizontal,
-  Sparkles, Star, Trash2, X,
+  Cloud, LogOut, ShieldCheck, Sparkles, Star, Trash2, X,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 type PlaceStatus = 'open' | 'soon' | 'closed';
 type Place = {
@@ -23,6 +23,12 @@ type Place = {
 type StoredPlaceRef = Partial<Place> & Pick<Place, 'id' | 'placeId'> & { destination: string };
 
 type MapsStatus = 'loading' | 'ready' | 'needs-key' | 'error';
+type AuthUser = { id: string; email: string; name: string; picture?: string };
+type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error';
+type GoogleIdentityApi = {
+  initialize: (options: { client_id: string; callback: (response: { credential?: string }) => void }) => void;
+  renderButton: (parent: HTMLElement, options: Record<string, string | number>) => void;
+};
 type SearchPrediction = {
   placeId: string;
   mainText: string;
@@ -124,11 +130,38 @@ export default function Home() {
   const [trackLocation, setTrackLocation] = useState(false);
   const [mapPlaceCandidate, setMapPlaceCandidate] = useState<Place | null>(null);
   const [mapPlaceLoading, setMapPlaceLoading] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState('');
+  const [oauthClientId, setOauthClientId] = useState('');
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
   const sessionTokenRef = useRef<google.maps.places.AutocompleteSessionToken | null>(null);
   const addingPlaceKeysRef = useRef(new Set<string>());
   const hydratedPlaceKeysRef = useRef(new Set<string>());
   const locationRequestedRef = useRef(false);
+  const googleButtonRef = useRef<HTMLDivElement>(null);
+  const cloudLoadedForUserRef = useRef('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const handleGoogleCredential = useCallback(async (response: { credential?: string }) => {
+    if (!response.credential) { setAuthError('O Google não retornou uma credencial válida.'); return; }
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const result = await fetch('/api/auth/google', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential: response.credential }),
+      });
+      const payload = await result.json() as { user?: AuthUser; error?: string };
+      if (!result.ok || !payload.user) throw new Error(payload.error || 'Não foi possível entrar');
+      cloudLoadedForUserRef.current = '';
+      setAuthUser(payload.user);
+      setAuthOpen(false);
+      setToast(`Olá, ${payload.user.name.split(' ')[0]}! Sincronizando seus roteiros…`);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Não foi possível entrar com o Google.');
+    } finally { setAuthLoading(false); }
+  }, []);
 
   useEffect(() => {
     const savedNotes = localStorage.getItem('roamly-notes');
@@ -193,6 +226,75 @@ export default function Home() {
     });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      fetch('/api/auth/config').then(async (response) => await response.json() as { clientId?: string }).catch(() => ({ clientId: '' })),
+      fetch('/api/auth/session').then(async (response) => await response.json() as { user?: AuthUser | null }).catch(() => ({ user: null })),
+    ]).then(([config, session]) => {
+      if (cancelled) return;
+      setOauthClientId(config.clientId ?? '');
+      setAuthUser(session.user ?? null);
+      setAuthLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!authOpen || authUser || !oauthClientId || !googleButtonRef.current) return;
+    let cancelled = false;
+    loadGoogleIdentity().then((identity) => {
+      if (cancelled || !googleButtonRef.current) return;
+      identity.initialize({ client_id: oauthClientId, callback: handleGoogleCredential });
+      googleButtonRef.current.replaceChildren();
+      identity.renderButton(googleButtonRef.current, { type: 'standard', theme: 'outline', size: 'large', shape: 'pill', text: 'signin_with', locale: 'pt-BR', width: 300 });
+    }).catch(() => { if (!cancelled) setAuthError('Não foi possível carregar o login do Google.'); });
+    return () => { cancelled = true; };
+  }, [authOpen, authUser, handleGoogleCredential, oauthClientId]);
+
+  useEffect(() => {
+    if (!authUser || !storageReady || cloudLoadedForUserRef.current === authUser.id) return;
+    let cancelled = false;
+    setSyncStatus('syncing');
+    fetch('/api/sync', { headers: { Accept: 'application/json' } }).then(async (response) => {
+      if (!response.ok) throw new Error('Não foi possível carregar seus roteiros');
+      return await response.json() as { data?: { maps?: string[]; currentMap?: string; places?: Place[] } | null };
+    }).then(async ({ data }) => {
+      if (cancelled) return;
+      if (data && Array.isArray(data.maps) && Array.isArray(data.places)) {
+        const nextMaps = Array.from(new Set(data.maps));
+        const nextMap = data.currentMap && nextMaps.includes(data.currentMap) ? data.currentMap : nextMaps[0] ?? '';
+        const nextPlaces = dedupePlaces(data.places);
+        setMaps(nextMaps);
+        setCurrentMap(nextMap);
+        setPlaces(nextPlaces);
+        setSelectedId(nextPlaces.find((place) => (place.destination ?? 'Madri') === nextMap)?.id ?? '');
+        localStorage.setItem('roamly-notes', JSON.stringify(Object.fromEntries(nextPlaces.map((place) => [place.id, place.note]))));
+        hydratedPlaceKeysRef.current.clear();
+        setToast('Roteiros carregados da sua conta Google');
+      } else {
+        await saveCloudState(maps, currentMap, places);
+        if (!cancelled) setToast('Roteiros deste aparelho vinculados à sua conta');
+      }
+      if (!cancelled) {
+        cloudLoadedForUserRef.current = authUser.id;
+        setSyncStatus('synced');
+      }
+    }).catch(() => { if (!cancelled) setSyncStatus('error'); });
+    return () => { cancelled = true; };
+    // Run once for each authenticated account after local storage is restored.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser?.id, storageReady]);
+
+  useEffect(() => {
+    if (!authUser || !storageReady || cloudLoadedForUserRef.current !== authUser.id) return;
+    setSyncStatus('syncing');
+    const timer = window.setTimeout(() => {
+      saveCloudState(maps, currentMap, places).then(() => setSyncStatus('synced')).catch(() => setSyncStatus('error'));
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [authUser, currentMap, maps, places, storageReady]);
 
   useEffect(() => {
     if (apiKey === null) return;
@@ -546,6 +648,15 @@ export default function Home() {
     setApiKey(cleanKey);
   }
 
+  async function logout() {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    cloudLoadedForUserRef.current = '';
+    setAuthUser(null);
+    setSyncStatus('idle');
+    setAuthOpen(false);
+    setToast('Você saiu da conta. Os roteiros continuam salvos no aparelho.');
+  }
+
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(''), 2800);
@@ -560,7 +671,11 @@ export default function Home() {
           <span className="trip-pin"><MapPin size={17} fill="currentColor" /></span>
           <span><small>MEU ROTEIRO</small><strong>{currentMap || 'Criar mapa'}</strong></span><ChevronDown size={17} />
         </button>
-        <div className="header-actions"><span className={`live-pill ${mapsStatus === 'ready' ? 'online' : ''}`}><i />{mapsStatus === 'ready' ? 'Maps ao vivo' : 'Conectando'}</span><button className="avatar" aria-label="Abrir perfil">AS</button></div>
+        <div className="header-actions">
+          <span className={`live-pill ${mapsStatus === 'ready' ? 'online' : ''}`}><i />{mapsStatus === 'ready' ? 'Maps ao vivo' : 'Conectando'}</span>
+          {authUser && <span className={`sync-pill ${syncStatus}`}><Cloud size={12} />{syncStatus === 'synced' ? 'Sincronizado' : syncStatus === 'error' ? 'Falha ao sincronizar' : 'Sincronizando'}</span>}
+          <button className={`avatar ${authUser ? 'signed-in' : ''}`} onClick={() => setAuthOpen(true)} aria-label={authUser ? `Abrir conta de ${authUser.name}` : 'Entrar com Google'} title={authUser?.email || 'Entrar com Google'}>{authUser ? userInitials(authUser.name) : 'G'}</button>
+        </div>
       </header>
 
       <section className="toolbar" aria-label="Ferramentas do mapa">
@@ -682,6 +797,30 @@ export default function Home() {
         <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}><Menu size={21} /><span>Lista</span></button>
         <button onClick={() => setMapsOpen(true)}><Plus size={22} /><span>Novo mapa</span></button>
       </nav>
+
+      {authOpen && (
+        <div className="modal-backdrop auth-backdrop" onClick={() => setAuthOpen(false)}>
+          <section className="auth-modal" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="auth-title">
+            <div className="modal-heading"><div><span>SUA CONTA</span><h2 id="auth-title">{authUser ? 'Roteiros sincronizados' : 'Entre no Roamly'}</h2></div><button onClick={() => setAuthOpen(false)} aria-label="Fechar"><X size={19} /></button></div>
+            {authUser ? (
+              <>
+                <div className="account-card"><span className="account-avatar">{userInitials(authUser.name)}</span><span><strong>{authUser.name}</strong><small>{authUser.email}</small></span></div>
+                <div className={`account-sync ${syncStatus}`}><ShieldCheck size={18} /><span><strong>{syncStatus === 'synced' ? 'Tudo salvo na nuvem' : syncStatus === 'error' ? 'Não foi possível sincronizar' : 'Sincronizando seus roteiros'}</strong><small>Seus mapas ficam vinculados a esta Conta Google.</small></span></div>
+                <button className="logout-button" onClick={logout}><LogOut size={17} /> Sair da conta</button>
+              </>
+            ) : (
+              <>
+                <p className="auth-copy">Acesse seus mapas e lugares salvos em qualquer dispositivo.</p>
+                <div ref={googleButtonRef} className="google-login-button" />
+                {authLoading && <div className="auth-loading"><span className="search-spinner" /> Preparando login…</div>}
+                {authError && <p className="auth-error">{authError}</p>}
+                {!oauthClientId && !authLoading && <p className="auth-error">O login do Google ainda não foi configurado neste ambiente.</p>}
+                <p className="auth-privacy"><ShieldCheck size={14} /> O Roamly recebe apenas seu nome, e-mail e identificação da Conta Google.</p>
+              </>
+            )}
+          </section>
+        </div>
+      )}
 
       {routeOpen && (
         <div className="modal-backdrop" onClick={() => setRouteOpen(false)}>
@@ -1114,6 +1253,42 @@ function sortableDistance(place: Place, userPosition: google.maps.LatLngLiteral 
   if (place.distance.endsWith(' km')) return Number(place.distance.replace(' km', '').replace('.', '').replace(',', '.')) * 1000;
   if (place.distance.endsWith(' m')) return Number(place.distance.replace(' m', '').replace('.', ''));
   return Number.POSITIVE_INFINITY;
+}
+
+function loadGoogleIdentity(): Promise<GoogleIdentityApi> {
+  const current = (window as unknown as { google?: { accounts?: { id?: GoogleIdentityApi } } }).google?.accounts?.id;
+  if (current) return Promise.resolve(current);
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-roamly-google-identity]');
+    const script = existing ?? document.createElement('script');
+    const finish = () => {
+      const identity = (window as unknown as { google?: { accounts?: { id?: GoogleIdentityApi } } }).google?.accounts?.id;
+      if (identity) resolve(identity); else reject(new Error('Google Identity indisponível'));
+    };
+    script.addEventListener('load', finish, { once: true });
+    script.addEventListener('error', () => reject(new Error('Falha ao carregar Google Identity')), { once: true });
+    if (!existing) {
+      script.src = 'https://accounts.google.com/gsi/client';
+      script.async = true;
+      script.defer = true;
+      script.dataset.roamlyGoogleIdentity = 'true';
+      document.head.appendChild(script);
+    }
+  });
+}
+
+async function saveCloudState(maps: string[], currentMap: string, places: Place[]) {
+  const response = await fetch('/api/sync', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ maps, currentMap, places: dedupePlaces(places), updatedAt: Date.now() }),
+  });
+  if (!response.ok) throw new Error('Não foi possível sincronizar seus roteiros');
+}
+
+function userInitials(name: string) {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  return `${words[0]?.[0] ?? 'G'}${words.length > 1 ? words.at(-1)?.[0] ?? '' : ''}`.toLocaleUpperCase('pt-BR');
 }
 
 function getPinColor(place: Place) { return place.pinColor || statusPinColors[place.status]; }
