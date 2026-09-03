@@ -1,8 +1,13 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Geist } from 'next/font/google';
 import './globals.css';
 
 const geist = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
+
+export const viewport: Viewport = { themeColor: '#fffdfa' };
+
+// Apply before the first paint, including when Safari restores the installed web app.
+const themeBootstrap = `(function(){var t;try{t=localStorage.getItem('roamly-theme')}catch(e){}if(t!=='dark'&&t!=='light')t=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.dataset.theme=t;var m=document.querySelector('meta[name="theme-color"]');if(m)m.content=t==='dark'?'#14201b':'#fffdfa'})()`;
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://roamly-trip-guide-arthur.arthurmaquizito.chatgpt.site'),
@@ -13,5 +18,5 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="pt-BR"><body className={`${geist.variable} antialiased`}>{children}</body></html>;
+  return <html lang="pt-BR" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{ __html: themeBootstrap }} /></head><body className={`${geist.variable} antialiased`}>{children}</body></html>;
 }

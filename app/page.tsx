@@ -8,10 +8,13 @@
 import {
   Bike, BusFront, Car, Check, ChevronDown, Clock3, Compass, Footprints, LocateFixed,
   Map as MapIcon, MapPin, Menu, Navigation, Plus, Search, SlidersHorizontal,
-  Cloud, LogOut, ShieldCheck, Sparkles, Star, Trash2, X,
+  Cloud, LogOut, Moon, Sun, ShieldCheck, Sparkles, Star, Trash2, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { languageLocales, languageOptions, normalizeLanguage, translations, type Copy, type Language } from './i18n';
+import { createMarkerRegistry } from './map-markers';
+
+type Theme = 'light' | 'dark';
 
 type PlaceStatus = 'open' | 'soon' | 'closed';
 type Place = {
@@ -101,6 +104,8 @@ function dedupePlaces(items: Place[]) {
 }
 
 export default function Home() {
+  const [theme, setTheme] = useState<Theme>('light');
+  const [themeReady, setThemeReady] = useState(false);
   const [language, setLanguage] = useState<Language>('pt');
   const t = translations[language];
   const locale = languageLocales[language];
@@ -146,6 +151,24 @@ export default function Home() {
   const googleButtonRef = useRef<HTMLDivElement>(null);
   const cloudLoadedForUserRef = useRef('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+    setThemeReady(true);
+  }, []);
+
+  function toggleTheme() {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', next === 'dark' ? '#14201b' : '#fffdfa');
+    try { localStorage.setItem('roamly-theme', next); } catch { /* Theme still works when storage is unavailable. */ }
+    setTheme(next);
+  }
+
+  const updateUserPosition = useCallback((next: google.maps.LatLngLiteral) => {
+    // Ignore sub-metre GPS noise; distances and the blue dot remain live as you move.
+    setUserPosition((previous) => previous && haversineMeters(previous, next) < 1 ? previous : next);
+  }, []);
 
   useEffect(() => {
     const savedLanguage = normalizeLanguage(localStorage.getItem('roamly-language'));
@@ -317,6 +340,10 @@ export default function Home() {
   useEffect(() => {
     if (apiKey === null) return;
     if (!apiKey) { setMapsStatus('needs-key'); return; }
+    if (window.google?.maps?.Map && window.google.maps.marker?.AdvancedMarkerElement) {
+      setMapsStatus('ready');
+      return;
+    }
     let cancelled = false;
     setMapsStatus('loading'); setMapsError('');
     loadGoogleMaps(apiKey, language).then(() => {
@@ -381,14 +408,16 @@ export default function Home() {
     return places.filter((place) => {
       const matches = !normalized || `${place.name} ${place.category} ${place.address}`.toLocaleLowerCase(locale).includes(normalized);
       return (place.destination ?? 'Madri') === currentMap && matches && (!onlyOpen || place.status === 'open');
-    }).sort((a, b) => {
+    }).map((place) => userPosition && place.lat != null && place.lng != null
+      ? { ...place, distance: formatDistance(haversineMeters(userPosition, { lat: place.lat, lng: place.lng }), language) }
+      : place).sort((a, b) => {
       const aDistance = sortableDistance(a, userPosition);
       const bDistance = sortableDistance(b, userPosition);
       if (!Number.isFinite(aDistance) && Number.isFinite(bDistance)) return 1;
       if (Number.isFinite(aDistance) && !Number.isFinite(bDistance)) return -1;
       return aDistance !== bDistance ? aDistance - bDistance : a.name.localeCompare(b.name, locale);
     });
-  }, [places, query, onlyOpen, currentMap, mapsStatus, userPosition, locale]);
+  }, [places, query, onlyOpen, currentMap, mapsStatus, userPosition, locale, language]);
 
   const todayLabel = useMemo(() => formatDateLabel(new Date(), language), [language]);
   const openPlacesCount = visiblePlaces.filter((place) => place.status === 'open').length;
@@ -437,15 +466,16 @@ export default function Home() {
 
   useEffect(() => {
     if (!userPosition) return;
-    setPlaces((current) => current.map((place) => place.lat != null && place.lng != null ? { ...place, distance: formatDistance(haversineMeters(userPosition, { lat: place.lat, lng: place.lng }), language) } : place));
     setLocationLabel(t.liveLocation);
-  }, [userPosition, language, t.liveLocation]);
+  }, [userPosition, t.liveLocation]);
 
-  const selected = places.find((place) => place.id === selectedId) ?? places[0];
+  const selected = visiblePlaces.find((place) => place.id === selectedId) ?? places.find((place) => place.id === selectedId) ?? places[0];
 
   function showPlace(placeId: string) {
     setSelectedId(placeId);
     setDetailsDismissed(false);
+    const place = places.find((item) => item.id === placeId);
+    if (place?.lat != null && place.lng != null) liveMap?.panTo({ lat: place.lat, lng: place.lng });
   }
 
   function closePlaceDetails() {
@@ -693,6 +723,7 @@ export default function Home() {
           <span className={`live-pill ${mapsStatus === 'ready' ? 'online' : ''}`}><i />{mapsStatus === 'ready' ? t.mapsLive : t.connecting}</span>
           {authUser && <span className={`sync-pill ${syncStatus}`}><Cloud size={12} />{syncStatus === 'synced' ? t.synced : syncStatus === 'error' ? t.syncError : t.syncing}</span>}
           <label className="language-picker" title={t.language}><span>{language.toUpperCase()}</span><select value={language} onChange={(event) => changeLanguage(event.target.value as Language)} aria-label={t.language}>{languageOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><ChevronDown size={13} /></label>
+          <button className="theme-toggle" onClick={toggleTheme} disabled={!themeReady} aria-label={theme === 'dark' ? t.enableLightMode : t.enableDarkMode} title={theme === 'dark' ? t.enableLightMode : t.enableDarkMode} aria-pressed={theme === 'dark'}>{theme === 'dark' ? <Sun size={19} /> : <Moon size={19} />}</button>
           <button className={`avatar ${authUser ? 'signed-in' : ''}`} onClick={() => setAuthOpen(true)} aria-label={authUser ? `${t.openAccount} ${authUser.name}` : t.signInGoogle} title={authUser?.email || t.signInGoogle}>{authUser ? userInitials(authUser.name) : 'G'}</button>
         </div>
       </header>
@@ -761,7 +792,7 @@ export default function Home() {
             ))}
             {visiblePlaces.length === 0 && <div className="empty-map"><Search size={24} /><strong>{currentMap ? t.noPlaceFound : t.createFirstMap}</strong><span>{currentMap ? t.removeFilters : t.organizeTrip}</span></div>}
           </div>
-          {mapsStatus === 'ready' && <LiveGoogleMap places={visiblePlaces} selectedId={selectedId} onSelect={showPlace} onMapPlaceClick={selectPlaceFromMap} onUserPosition={setUserPosition} onMapReady={setLiveMap} trackUser={trackLocation} language={language} />}
+          {mapsStatus === 'ready' && storageReady && themeReady && <LiveGoogleMap places={visiblePlaces} selectedId={selectedId} onSelect={showPlace} onMapPlaceClick={selectPlaceFromMap} onUserPosition={updateUserPosition} onMapReady={setLiveMap} trackUser={trackLocation} userPosition={userPosition} language={language} theme={theme} />}
           {mapsStatus !== 'ready' && <MapsConnection status={mapsStatus} error={mapsError} onConnect={connectGoogleMaps} language={language} />}
           {mapsStatus === 'ready' && <div className="map-add-hint"><Plus size={15} /> {t.tapMapToAdd}</div>}
           {mapPlaceLoading && <div className="maps-connect-card compact map-place-loading"><span className="search-spinner" /><strong>{t.loadingPlace}</strong></div>}
@@ -1023,80 +1054,93 @@ function loadGoogleMaps(apiKey: string, language: Language) {
 }
 
 function LiveGoogleMap({
-  places, selectedId, onSelect, onMapPlaceClick, onUserPosition, onMapReady, trackUser, language,
+  places, selectedId, onSelect, onMapPlaceClick, onUserPosition, onMapReady, trackUser, userPosition, language, theme,
 }: {
   places: Place[]; selectedId: string; onSelect: (id: string) => void;
   onMapPlaceClick: (placeId: string) => void;
   onUserPosition: (position: google.maps.LatLngLiteral) => void;
   onMapReady: (map: google.maps.Map) => void;
   trackUser: boolean;
+  userPosition: google.maps.LatLngLiteral | null;
   language: Language;
+  theme: Theme;
 }) {
   const t = translations[language];
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
-  const markersRef = useRef<google.maps.marker.AdvancedMarkerElement[]>([]);
+  const markersRef = useRef<ReturnType<typeof createMarkerRegistry> | null>(null);
   const userMarkerRef = useRef<google.maps.marker.AdvancedMarkerElement | null>(null);
   const onMapPlaceClickRef = useRef(onMapPlaceClick);
+  const onSelectRef = useRef(onSelect);
+  const initialPlacesRef = useRef(places);
+  const viewportRef = useRef<{ center: google.maps.LatLngLiteral; zoom: number; heading: number; tilt: number } | null>(null);
 
   useEffect(() => { onMapPlaceClickRef.current = onMapPlaceClick; }, [onMapPlaceClick]);
+  useEffect(() => { onSelectRef.current = onSelect; }, [onSelect]);
 
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
-    const first = places.find((place) => place.lat != null && place.lng != null);
-    const map = new google.maps.Map(containerRef.current, {
+    const container = containerRef.current;
+    if (!container) return;
+    const first = initialPlacesRef.current.find((place) => place.lat != null && place.lng != null);
+    const map = new google.maps.Map(container, {
       center: first?.lat != null && first.lng != null ? { lat: first.lat, lng: first.lng } : { lat: 40.4168, lng: -3.7038 },
       zoom: 14, mapId: 'DEMO_MAP_ID', disableDefaultUI: true, clickableIcons: true,
-      gestureHandling: 'greedy', backgroundColor: '#edf0e9',
+      ...viewportRef.current,
+      // Google only accepts colorScheme at initialization. Preserve the camera
+      // when the user explicitly changes theme, never recreate it for GPS updates.
+      colorScheme: theme === 'dark' ? 'DARK' : 'LIGHT',
+      gestureHandling: 'greedy', backgroundColor: theme === 'dark' ? '#17221d' : '#edf0e9',
     });
-    map.addListener('click', (event: google.maps.MapMouseEvent) => {
+    const clickListener = map.addListener('click', (event: google.maps.MapMouseEvent) => {
       const iconEvent = event as google.maps.IconMouseEvent;
       if (!iconEvent.placeId) return;
       iconEvent.stop();
       onMapPlaceClickRef.current(iconEvent.placeId);
     });
+    markersRef.current = createMarkerRegistry(map, (id) => onSelectRef.current(id));
     mapRef.current = map; onMapReady(map);
-  }, [onMapReady, places]);
+    return () => {
+      const center = map.getCenter()?.toJSON();
+      if (center) viewportRef.current = { center, zoom: map.getZoom() ?? 14, heading: map.getHeading() ?? 0, tilt: map.getTilt() ?? 0 };
+      clickListener.remove();
+      markersRef.current?.clear();
+      markersRef.current = null;
+      if (userMarkerRef.current) userMarkerRef.current.map = null;
+      userMarkerRef.current = null;
+      google.maps.event.clearInstanceListeners(map);
+      mapRef.current = null;
+      container.replaceChildren();
+    };
+  }, [onMapReady, theme]);
 
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    markersRef.current.forEach((marker) => { marker.map = null; });
-    markersRef.current = places.filter((place) => place.lat != null && place.lng != null).map((place) => {
-      const pin = new google.maps.marker.PinElement({
-        background: getPinColor(place), borderColor: '#ffffff', glyphColor: '#ffffff',
-        glyphText: place.category === 'Restaurante' ? 'R' : place.category === 'Parque' ? 'P' : '•',
-        scale: place.id === selectedId ? 1.28 : 1.05,
-      });
-      const marker = new google.maps.marker.AdvancedMarkerElement({
-        map, position: { lat: place.lat!, lng: place.lng! }, title: `${place.name} — ${localizedStatusLabel(place.statusLabel, language)}`,
-        content: pin, gmpClickable: true, zIndex: place.id === selectedId ? 20 : 10,
-      });
-      marker.addEventListener('gmp-click', () => onSelect(place.id));
-      return marker;
-    });
-  }, [places, selectedId, onSelect, language]);
+    markersRef.current?.update(places.filter((place) => place.lat != null && place.lng != null).map((place) => ({
+      id: place.id, lat: place.lat!, lng: place.lng!,
+      title: `${place.name} — ${localizedStatusLabel(place.statusLabel, language)}`,
+      color: getPinColor(place), glyph: place.category === 'Restaurante' ? 'R' : place.category === 'Parque' ? 'P' : '•',
+      selected: place.id === selectedId,
+    })));
+  }, [places, selectedId, language, theme]);
 
   useEffect(() => {
-    const place = places.find((item) => item.id === selectedId);
-    if (place?.lat != null && place.lng != null && mapRef.current) mapRef.current.panTo({ lat: place.lat, lng: place.lng });
-  }, [selectedId, places]);
-
-  useEffect(() => {
-    if (!trackUser || !navigator.geolocation || !mapRef.current) return;
+    if (!trackUser || !navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition((position) => {
-      const next = { lat: position.coords.latitude, lng: position.coords.longitude };
-      onUserPosition(next);
-      if (!userMarkerRef.current) {
-        const dot = document.createElement('div');
-        dot.className = 'live-user-marker';
-        dot.setAttribute('aria-label', t.liveLocation);
-        userMarkerRef.current = new google.maps.marker.AdvancedMarkerElement({ map: mapRef.current, position: next, title: t.liveLocation, content: dot, zIndex: 50 });
-        mapRef.current?.panTo(next);
-      } else userMarkerRef.current.position = next;
+      onUserPosition({ lat: position.coords.latitude, lng: position.coords.longitude });
     }, () => undefined, { enableHighAccuracy: true, maximumAge: 5000, timeout: 12000 });
     return () => navigator.geolocation.clearWatch(watchId);
-  }, [onUserPosition, trackUser, t.liveLocation]);
+  }, [onUserPosition, trackUser]);
+
+  useEffect(() => {
+    if (!userPosition || !mapRef.current) return;
+    if (!userMarkerRef.current) {
+      const dot = document.createElement('div');
+      dot.className = 'live-user-marker';
+      userMarkerRef.current = new google.maps.marker.AdvancedMarkerElement({ map: mapRef.current, position: userPosition, title: t.liveLocation, content: dot, zIndex: 50 });
+    } else {
+      userMarkerRef.current.position = userPosition;
+      userMarkerRef.current.title = t.liveLocation;
+    }
+  }, [userPosition, t.liveLocation, theme]);
 
   return <div ref={containerRef} className="live-google-map" aria-label={t.liveMapLabel} />;
 }

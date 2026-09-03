@@ -14,6 +14,7 @@ export const languageLocales: Record<Language, string> = {
 
 export const translations = {
   pt: {
+    enableDarkMode: 'Ativar modo noturno', enableLightMode: 'Ativar modo claro',
     language: 'Idioma', itinerary: 'MEU ROTEIRO', createMap: 'Criar mapa', switchTrip: 'Trocar mapa de viagem',
     mapsLive: 'Maps ao vivo', connecting: 'Conectando', synced: 'Sincronizado', syncError: 'Falha ao sincronizar', syncing: 'Sincronizando', signInGoogle: 'Entrar com Google', openAccount: 'Abrir conta de',
     mapTools: 'Ferramentas do mapa', searchMaps: 'Buscar no Google Maps', searchItinerary: 'Buscar no seu roteiro', searching: 'Buscando', clearSearch: 'Limpar busca', mapsResults: 'Resultados do Google Maps', saved: 'Salvo', noResults: 'Nenhum resultado encontrado.', filters: 'Filtros', filterPlaces: 'Filtrar lugares', showOnMap: 'Mostrar no mapa', onlyOpen: 'Somente abertos agora',
@@ -29,6 +30,7 @@ export const translations = {
     green: 'Verde', yellow: 'Amarelo', red: 'Vermelho', blue: 'Azul', purple: 'Roxo',
   },
   es: {
+    enableDarkMode: 'Activar modo nocturno', enableLightMode: 'Activar modo claro',
     language: 'Idioma', itinerary: 'MI ITINERARIO', createMap: 'Crear mapa', switchTrip: 'Cambiar mapa de viaje',
     mapsLive: 'Maps en vivo', connecting: 'Conectando', synced: 'Sincronizado', syncError: 'Error al sincronizar', syncing: 'Sincronizando', signInGoogle: 'Entrar con Google', openAccount: 'Abrir cuenta de',
     mapTools: 'Herramientas del mapa', searchMaps: 'Buscar en Google Maps', searchItinerary: 'Buscar en tu itinerario', searching: 'Buscando', clearSearch: 'Limpiar búsqueda', mapsResults: 'Resultados de Google Maps', saved: 'Guardado', noResults: 'No se encontraron resultados.', filters: 'Filtros', filterPlaces: 'Filtrar lugares', showOnMap: 'Mostrar en el mapa', onlyOpen: 'Solo abiertos ahora',
@@ -44,6 +46,7 @@ export const translations = {
     green: 'Verde', yellow: 'Amarillo', red: 'Rojo', blue: 'Azul', purple: 'Morado',
   },
   en: {
+    enableDarkMode: 'Enable dark mode', enableLightMode: 'Enable light mode',
     language: 'Language', itinerary: 'MY ITINERARY', createMap: 'Create map', switchTrip: 'Switch trip map',
     mapsLive: 'Live Maps', connecting: 'Connecting', synced: 'Synced', syncError: 'Sync failed', syncing: 'Syncing', signInGoogle: 'Sign in with Google', openAccount: 'Open account for',
     mapTools: 'Map tools', searchMaps: 'Search Google Maps', searchItinerary: 'Search your itinerary', searching: 'Searching', clearSearch: 'Clear search', mapsResults: 'Google Maps results', saved: 'Saved', noResults: 'No results found.', filters: 'Filters', filterPlaces: 'Filter places', showOnMap: 'Show on map', onlyOpen: 'Open now only',
