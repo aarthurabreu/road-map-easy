@@ -17,6 +17,7 @@ type GoogleTokenInfo = {
 
 const cookieName = 'roamly_session';
 const sessionLifetimeSeconds = 60 * 60 * 24 * 7;
+const challengeCookieName = 'roamly_login_challenge';
 
 function clientId() {
   return process.env.GOOGLE_OAUTH_CLIENT_ID?.trim() ?? '';
@@ -50,6 +51,37 @@ function timingSafeEqual(a: string, b: string) {
   return difference === 0;
 }
 
+function cookieValue(request: Request, name: string) {
+  const values = (request.headers.get('cookie') ?? '').split(';').map((part) => part.trim()).filter((part) => part.startsWith(`${name}=`));
+  return values.length === 1 ? values[0].slice(name.length + 1) : '';
+}
+
+export async function createBrowserChallenge(request: Request) {
+  const payload = encode(JSON.stringify({ nonce: crypto.randomUUID(), exp: Math.floor(Date.now() / 1000) + 600 }));
+  const token = `${payload}.${await signature(`login:${payload}`)}`;
+  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+  return { token, cookie: `${challengeCookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=600${secure}` };
+}
+
+export async function verifyBrowserChallenge(request: Request) {
+  const token = request.headers.get('x-roamly-csrf') ?? '';
+  const cookie = cookieValue(request, challengeCookieName);
+  if (!token || token.length > 1024 || !cookie || !timingSafeEqual(token, cookie)) return false;
+  try {
+    const separator = token.lastIndexOf('.');
+    if (separator < 1) return false;
+    const payload = token.slice(0, separator);
+    if (!timingSafeEqual(token.slice(separator + 1), await signature(`login:${payload}`))) return false;
+    const value = JSON.parse(decode(payload)) as { nonce?: string; exp?: number };
+    return typeof value.nonce === 'string' && typeof value.exp === 'number' && value.exp > Math.floor(Date.now() / 1000);
+  } catch { return false; }
+}
+
+export function clearBrowserChallenge(request: Request) {
+  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+  return `${challengeCookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
+}
+
 export function getGoogleClientId() {
   return clientId();
 }
@@ -57,7 +89,7 @@ export function getGoogleClientId() {
 export async function verifyGoogleCredential(credential: string): Promise<GoogleUser> {
   const expectedAudience = clientId();
   if (!expectedAudience) throw new Error('GOOGLE_OAUTH_CLIENT_ID não configurado');
-  if (!credential || credential.length > 10_000) throw new Error('Credencial Google inválida');
+  if (typeof credential !== 'string' || !credential || credential.length > 10_000) throw new Error('Credencial Google inválida');
 
   const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`, {
     headers: { Accept: 'application/json' },

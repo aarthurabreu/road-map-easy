@@ -1,9 +1,17 @@
-import { clearSessionCookie } from '../../_lib/auth';
+import { clearBrowserChallenge, clearSessionCookie, getSessionUser } from '../../_lib/auth';
+import { checkAuthMutation, checkExpectedAccount, jsonError } from '../../_lib/request-security';
 
 export const runtime = 'edge';
 
 export async function POST(request: Request) {
-  return Response.json({ ok: true }, {
-    headers: { 'Cache-Control': 'no-store', 'Set-Cookie': clearSessionCookie(request) },
-  });
+  const denied = await checkAuthMutation(request);
+  if (denied) return denied;
+  const user = await getSessionUser(request);
+  if (!user) return jsonError('Sessão encerrada', 401);
+  const mismatch = checkExpectedAccount(request, user);
+  if (mismatch) return mismatch;
+  const headers = new Headers({ 'Cache-Control': 'no-store' });
+  headers.append('Set-Cookie', clearSessionCookie(request));
+  headers.append('Set-Cookie', clearBrowserChallenge(request));
+  return Response.json({ ok: true }, { headers });
 }

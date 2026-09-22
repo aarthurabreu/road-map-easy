@@ -1,5 +1,6 @@
 import { database, ensureDatabase } from '../_lib/db';
 import { getSessionUser } from '../_lib/auth';
+import { checkExpectedAccount, checkMutation } from '../_lib/request-security';
 
 export const runtime = 'edge';
 
@@ -17,11 +18,13 @@ function unauthorized() {
 export async function GET(request: Request) {
   const user = await getSessionUser(request);
   if (!user) return unauthorized();
+  const mismatch = checkExpectedAccount(request, user);
+  if (mismatch) return mismatch;
   try {
     const db = database();
     await ensureDatabase(db);
     const row = await db.prepare('SELECT data_json, updated_at FROM user_itineraries WHERE user_id = ?').bind(user.id).first<{ data_json: string; updated_at: number }>();
-    return Response.json({ data: row ? JSON.parse(row.data_json) : null, updatedAt: row?.updated_at ?? null }, {
+    return Response.json({ userId: user.id, data: row ? JSON.parse(row.data_json) : null, updatedAt: row?.updated_at ?? null }, {
       headers: { 'Cache-Control': 'no-store' },
     });
   } catch (error) {
@@ -30,8 +33,12 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
+  const denied = checkMutation(request);
+  if (denied) return denied;
   const user = await getSessionUser(request);
   if (!user) return unauthorized();
+  const mismatch = checkExpectedAccount(request, user);
+  if (mismatch) return mismatch;
   try {
     const data = await request.json() as CloudItinerary;
     if (!Array.isArray(data.maps) || !Array.isArray(data.places) || typeof data.currentMap !== 'string') {

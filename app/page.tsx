@@ -13,6 +13,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { languageLocales, languageOptions, normalizeLanguage, translations, type Copy, type Language } from './i18n';
 import { createMarkerRegistry } from './map-markers';
+import { accountStorage, accountFetch, AccountChangedError, authChallenge, accountChangeKey, announceAccountChange, type ItineraryStorage } from './account-storage';
 
 type Theme = 'light' | 'dark';
 
@@ -144,6 +145,10 @@ export default function Home() {
   const [authError, setAuthError] = useState('');
   const [oauthClientId, setOauthClientId] = useState('');
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
+  const [cacheOwner, setCacheOwner] = useState<string | null | undefined>(undefined);
+  const [syncAttempt, setSyncAttempt] = useState(0);
+  const accountActiveRef = useRef(true);
+  const accountTransitionRef = useRef(0);
   const sessionTokenRef = useRef<google.maps.places.AutocompleteSessionToken | null>(null);
   const addingPlaceKeysRef = useRef(new Set<string>());
   const hydratedPlaceKeysRef = useRef(new Set<string>());
@@ -151,6 +156,15 @@ export default function Home() {
   const googleButtonRef = useRef<HTMLDivElement>(null);
   const cloudLoadedForUserRef = useRef('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  function localItineraryStorage() { return accountStorage(localStorage, cacheOwner ?? null); }
+
+  const reloadForAccountChange = useCallback(() => {
+    accountTransitionRef.current += 1;
+    accountActiveRef.current = false;
+    cloudLoadedForUserRef.current = '';
+    window.location.reload();
+  }, []);
 
   useEffect(() => {
     setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
@@ -190,74 +204,37 @@ export default function Home() {
     setAuthLoading(true);
     setAuthError('');
     try {
+      const csrfToken = await authChallenge();
+      if (!accountActiveRef.current) return;
       const result = await fetch('/api/auth/google', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential: response.credential }),
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Roamly-CSRF': csrfToken }, body: JSON.stringify({ credential: response.credential }),
       });
       const payload = await result.json() as { user?: AuthUser; error?: string };
       if (!result.ok || !payload.user) throw new Error(payload.error || (language === 'es' ? 'No se pudo iniciar sesión' : language === 'en' ? 'Could not sign in' : 'Não foi possível entrar'));
-      cloudLoadedForUserRef.current = '';
-      setAuthUser(payload.user);
-      setAuthOpen(false);
-      setToast(language === 'es' ? `¡Hola, ${payload.user.name.split(' ')[0]}! Sincronizando tus itinerarios…` : language === 'en' ? `Hi, ${payload.user.name.split(' ')[0]}! Syncing your itineraries…` : `Olá, ${payload.user.name.split(' ')[0]}! Sincronizando seus roteiros…`);
+      announceAccountChange();
+      reloadForAccountChange();
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : language === 'es' ? 'No se pudo iniciar sesión con Google.' : language === 'en' ? 'Could not sign in with Google.' : 'Não foi possível entrar com o Google.');
     } finally { setAuthLoading(false); }
-  }, [language]);
+  }, [language, reloadForAccountChange]);
 
   useEffect(() => {
-    const savedNotes = localStorage.getItem('roamly-notes');
-    try {
-      const notes = savedNotes ? JSON.parse(savedNotes) as Record<string, string> : {};
-      const savedMapsRaw = localStorage.getItem('roamly-maps');
-      const savedMaps = savedMapsRaw === null ? null : JSON.parse(savedMapsRaw) as string[];
-      const savedRefs = JSON.parse(localStorage.getItem('roamly-place-refs') ?? '[]') as StoredPlaceRef[];
-      const removedKeys = new Set((JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[]).map((key) => {
-        const separator = key.indexOf(':');
-        if (separator < 0) return key;
-        const oldPlaceId = key.slice(0, separator);
-        return `${legacyPlaceIds[oldPlaceId] ?? oldPlaceId}${key.slice(separator)}`;
-      }));
-      if (Array.isArray(savedMaps)) {
-        const restoredMaps = Array.from(new Set(savedMaps));
-        const savedCurrentMap = localStorage.getItem('roamly-current-map');
-        setMaps(restoredMaps);
-        setCurrentMap(savedCurrentMap && restoredMaps.includes(savedCurrentMap) ? savedCurrentMap : restoredMaps[0] ?? '');
-      }
-      setPlaces((current) => {
-        const savedRefByKey = new Map(savedRefs.map((ref) => [placeKey(ref.placeId, ref.destination), ref]));
-        const hydrated = current.map((place) => {
-          const savedRef = savedRefByKey.get(placeKey(place.placeId, place.destination ?? 'Madri'));
-          return {
-            ...place,
-            ...savedRef,
-            id: place.id,
-            placeId: place.placeId,
-            destination: place.destination,
-            note: notes[place.id] ?? savedRef?.note ?? place.note,
-            photo: savedRef?.photo || place.photo,
-            pinColor: savedRef?.pinColor ?? place.pinColor,
-          };
-        });
-        const known = new Set(hydrated.map((place) => placeKey(place.placeId, place.destination ?? 'Madri')));
-        const restored = savedRefs.filter((ref) => !known.has(placeKey(ref.placeId, ref.destination))).map((ref, index) => ({
-          ...ref,
-          id: ref.id, placeId: ref.placeId, destination: ref.destination, note: ref.note ?? '', pinColor: ref.pinColor,
-          name: ref.name ?? 'Carregando lugar…', category: ref.category ?? 'Google Places', address: ref.address ?? '', hours: ref.hours ?? 'Consultando horários',
-          status: ref.status ?? 'closed' as PlaceStatus, statusLabel: ref.statusLabel ?? 'Atualizando', distance: ref.distance ?? '—', photo: ref.photo ?? '',
-          x: ref.x ?? 45 + index * 4, y: ref.y ?? 45 + index * 3, rating: ref.rating ?? '—',
-        }));
-        return dedupePlaces([...hydrated, ...restored]).filter((place) => !removedKeys.has(placeKey(place.placeId, place.destination ?? 'Madri')));
-      });
-    } catch { /* Keep curated defaults if local data is invalid. */ }
+    if (cacheOwner === undefined) return;
+    const restored = restoreLocalItinerary(accountStorage(localStorage, cacheOwner), cacheOwner === null);
+    setMaps(restored.maps);
+    setCurrentMap(restored.currentMap);
+    setPlaces(restored.places);
     setStorageReady(true);
-  }, []);
+  }, [cacheOwner]);
 
   useEffect(() => {
-    if (!storageReady) return;
-    localStorage.setItem('roamly-maps', JSON.stringify(maps));
-    localStorage.setItem('roamly-current-map', currentMap);
-    localStorage.setItem('roamly-place-refs', JSON.stringify(dedupePlaces(places).map((place) => ({ ...place, destination: place.destination ?? 'Madri' }))));
-  }, [maps, places, currentMap, storageReady]);
+    if (!storageReady || cacheOwner === undefined || !accountActiveRef.current) return;
+    const storage = accountStorage(localStorage, cacheOwner);
+    storage.setItem('roamly-maps', JSON.stringify(maps));
+    storage.setItem('roamly-current-map', currentMap);
+    storage.setItem('roamly-place-refs', JSON.stringify(dedupePlaces(places).map((place) => ({ ...place, destination: place.destination ?? 'Madri' }))));
+    storage.setItem('roamly-notes', JSON.stringify(Object.fromEntries(places.map((place) => [place.id, place.note]))));
+  }, [maps, places, currentMap, storageReady, cacheOwner]);
 
   useEffect(() => {
     let cancelled = false;
@@ -272,15 +249,46 @@ export default function Home() {
     let cancelled = false;
     Promise.all([
       fetch('/api/auth/config').then(async (response) => await response.json() as { clientId?: string }).catch(() => ({ clientId: '' })),
-      fetch('/api/auth/session').then(async (response) => await response.json() as { user?: AuthUser | null }).catch(() => ({ user: null })),
+      fetch('/api/auth/session', { cache: 'no-store' }).then(async (response) => {
+        if (!response.ok) throw new Error('Session unavailable');
+        return await response.json() as { user?: AuthUser | null };
+      }).catch(() => ({ user: null })),
     ]).then(([config, session]) => {
-      if (cancelled) return;
+      if (cancelled || !accountActiveRef.current) return;
       setOauthClientId(config.clientId ?? '');
       setAuthUser(session.user ?? null);
+      setCacheOwner(session.user?.id ?? null);
       setAuthLoading(false);
     });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (cacheOwner === undefined) return;
+    let cancelled = false;
+    const recheck = async () => {
+      try {
+        const response = await fetch('/api/auth/session', { cache: 'no-store' });
+        if (!response.ok) return;
+        const session = await response.json() as { user?: AuthUser | null };
+        if (!cancelled && (session.user?.id ?? null) !== cacheOwner) reloadForAccountChange();
+      } catch { /* Offline edits remain scoped to this account; writes still check the cookie on the server. */ }
+    };
+    const visibility = () => { if (document.visibilityState === 'visible') void recheck(); };
+    const storage = (event: StorageEvent) => { if (event.key === accountChangeKey) reloadForAccountChange(); };
+    const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(accountChangeKey);
+    if (channel) channel.onmessage = reloadForAccountChange;
+    window.addEventListener('focus', recheck);
+    window.addEventListener('storage', storage);
+    document.addEventListener('visibilitychange', visibility);
+    return () => {
+      cancelled = true;
+      channel?.close();
+      window.removeEventListener('focus', recheck);
+      window.removeEventListener('storage', storage);
+      document.removeEventListener('visibilitychange', visibility);
+    };
+  }, [cacheOwner, reloadForAccountChange]);
 
   useEffect(() => {
     if (!authOpen || authUser || !oauthClientId || !googleButtonRef.current) return;
@@ -295,48 +303,73 @@ export default function Home() {
   }, [authOpen, authUser, handleGoogleCredential, language, locale, oauthClientId]);
 
   useEffect(() => {
-    if (!authUser || !storageReady || cloudLoadedForUserRef.current === authUser.id) return;
+    if (!authUser || !storageReady || cacheOwner !== authUser.id || cloudLoadedForUserRef.current === authUser.id) return;
     let cancelled = false;
+    const owner = authUser.id;
     setSyncStatus('syncing');
-    fetch('/api/sync', { headers: { Accept: 'application/json' } }).then(async (response) => {
-      if (!response.ok) throw new Error(language === 'es' ? 'No se pudieron cargar tus itinerarios' : language === 'en' ? 'Could not load your itineraries' : 'Não foi possível carregar seus roteiros');
-      return await response.json() as { data?: { maps?: string[]; currentMap?: string; places?: Place[] } | null };
+    accountFetch(owner, '/api/sync').then(async (response) => {
+      if (!response.ok) throw new Error('Não foi possível carregar seus roteiros');
+      const payload = await response.json() as { userId?: string; data?: { maps: string[]; currentMap: string; places: Place[] } | null };
+      if (payload.userId !== owner) throw new AccountChangedError('A conta mudou');
+      return payload;
     }).then(async ({ data }) => {
-      if (cancelled) return;
-      if (data && Array.isArray(data.maps) && Array.isArray(data.places)) {
-        const nextMaps = Array.from(new Set(data.maps));
-        const nextMap = data.currentMap && nextMaps.includes(data.currentMap) ? data.currentMap : nextMaps[0] ?? '';
-        const nextPlaces = dedupePlaces(data.places);
-        setMaps(nextMaps);
-        setCurrentMap(nextMap);
-        setPlaces(nextPlaces);
-        setSelectedId(nextPlaces.find((place) => (place.destination ?? 'Madri') === nextMap)?.id ?? '');
-        localStorage.setItem('roamly-notes', JSON.stringify(Object.fromEntries(nextPlaces.map((place) => [place.id, place.note]))));
-        hydratedPlaceKeysRef.current.clear();
-        setToast(language === 'es' ? 'Itinerarios cargados desde tu Cuenta de Google' : language === 'en' ? 'Itineraries loaded from your Google Account' : 'Roteiros carregados da sua conta Google');
-      } else {
-        await saveCloudState(maps, currentMap, places);
-        if (!cancelled) setToast(language === 'es' ? 'Los itinerarios de este dispositivo se vincularon a tu cuenta' : language === 'en' ? 'This device’s itineraries were linked to your account' : 'Roteiros deste aparelho vinculados à sua conta');
+      if (cancelled || !accountActiveRef.current) return;
+      let next = data;
+      if (!next) {
+        // This account's own offline cache may sync automatically, never another owner's.
+        next = restoreLocalItinerary(accountStorage(localStorage, owner), false);
+        const guestStorage = accountStorage(localStorage, null);
+        if (next.maps.length === 0 && guestStorage.getItem('roamly-maps') !== null) {
+          const guest = restoreLocalItinerary(guestStorage, true);
+          if (guest.maps.length > 0 && window.confirm(language === 'es'
+            ? `¿Importar los itinerarios locales de este dispositivo a ${authUser.email}? Hazlo solo si son tuyos.`
+            : language === 'en'
+              ? `Import this device's local itineraries into ${authUser.email}? Only do this if they are yours.`
+              : `Importar os roteiros locais deste aparelho para ${authUser.email}? Faça isso apenas se forem seus.`)) next = guest;
+        }
       }
-      if (!cancelled) {
-        cloudLoadedForUserRef.current = authUser.id;
-        setSyncStatus('synced');
-      }
-    }).catch(() => { if (!cancelled) setSyncStatus('error'); });
+      if (cancelled || !accountActiveRef.current) return;
+      const nextMaps = Array.from(new Set(next.maps));
+      const nextMap = next.currentMap && nextMaps.includes(next.currentMap) ? next.currentMap : nextMaps[0] ?? '';
+      const nextPlaces = dedupePlaces(next.places);
+      // Clear this owner's obsolete note/tombstone copies when replacing its snapshot.
+      const storage = accountStorage(localStorage, owner);
+      storage.setItem('roamly-notes', JSON.stringify(Object.fromEntries(nextPlaces.map((place) => [place.id, place.note]))));
+      storage.setItem(removedPlacesStorageKey, '[]');
+      setMaps(nextMaps);
+      setCurrentMap(nextMap);
+      setPlaces(nextPlaces);
+      setSelectedId(nextPlaces.find((place) => (place.destination ?? 'Madri') === nextMap)?.id ?? '');
+      hydratedPlaceKeysRef.current.clear();
+      cloudLoadedForUserRef.current = owner;
+      setSyncStatus('synced');
+    }).catch((error) => {
+      if (cancelled || !accountActiveRef.current) return;
+      if (error instanceof AccountChangedError) reloadForAccountChange();
+      else setSyncStatus('error');
+    });
     return () => { cancelled = true; };
-    // Run once for each authenticated account after local storage is restored.
+    // Initialize each account once; subsequent edits are handled by the bound autosave.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authUser?.id, storageReady, language]);
+  }, [authUser?.id, cacheOwner, storageReady, syncAttempt, reloadForAccountChange]);
 
   useEffect(() => {
-    if (!authUser || !storageReady || cloudLoadedForUserRef.current !== authUser.id) return;
-    setSyncStatus('syncing');
+    if (!authUser || !storageReady || cacheOwner !== authUser.id || cloudLoadedForUserRef.current !== authUser.id || !accountActiveRef.current) return;
+    let cancelled = false;
+    const owner = authUser.id;
     const timer = window.setTimeout(() => {
-      saveCloudState(maps, currentMap, places).then(() => setSyncStatus('synced')).catch(() => setSyncStatus('error'));
+      if (!accountActiveRef.current) return;
+      setSyncStatus('syncing');
+      saveCloudState(owner, maps, currentMap, places).then(() => {
+        if (!cancelled && accountActiveRef.current) setSyncStatus('synced');
+      }).catch((error) => {
+        if (cancelled || !accountActiveRef.current) return;
+        if (error instanceof AccountChangedError) reloadForAccountChange();
+        else setSyncStatus('error');
+      });
     }, 900);
-    return () => window.clearTimeout(timer);
-  }, [authUser, currentMap, maps, places, storageReady]);
-
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [authUser, cacheOwner, currentMap, maps, places, storageReady, reloadForAccountChange]);
   useEffect(() => {
     if (apiKey === null) return;
     if (!apiKey) { setMapsStatus('needs-key'); return; }
@@ -487,7 +520,7 @@ export default function Home() {
   function saveNote(value: string) {
     const next = places.map((place) => (place.id === selected.id ? { ...place, note: value } : place));
     setPlaces(next);
-    localStorage.setItem('roamly-notes', JSON.stringify(Object.fromEntries(next.map((place) => [place.id, place.note]))));
+    localItineraryStorage().setItem('roamly-notes', JSON.stringify(Object.fromEntries(next.map((place) => [place.id, place.note]))));
   }
 
   function savePinColor(pinColor?: string) {
@@ -578,8 +611,8 @@ export default function Home() {
       hydratedPlaceKeysRef.current.add(key);
       setPlaces((current) => dedupePlaces([...current, savedPlace]));
       try {
-        const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
-        localStorage.setItem(removedPlacesStorageKey, JSON.stringify(removed.filter((removedKey) => removedKey !== key)));
+        const removed = JSON.parse(localItineraryStorage().getItem(removedPlacesStorageKey) ?? '[]') as string[];
+        localItineraryStorage().setItem(removedPlacesStorageKey, JSON.stringify(removed.filter((removedKey) => removedKey !== key)));
       } catch { /* A fresh save can continue if old local preferences are malformed. */ }
       showPlace(savedPlace.id); setQuery(''); setPredictions([]);
       setView('map');
@@ -633,8 +666,8 @@ export default function Home() {
     setPlaces((current) => dedupePlaces([...current, mapPlaceCandidate]));
     hydratedPlaceKeysRef.current.add(key);
     try {
-      const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
-      localStorage.setItem(removedPlacesStorageKey, JSON.stringify(removed.filter((removedKey) => removedKey !== key)));
+      const removed = JSON.parse(localItineraryStorage().getItem(removedPlacesStorageKey) ?? '[]') as string[];
+      localItineraryStorage().setItem(removedPlacesStorageKey, JSON.stringify(removed.filter((removedKey) => removedKey !== key)));
     } catch { /* A fresh save can continue if old local preferences are malformed. */ }
     showPlace(mapPlaceCandidate.id);
     setMapPlaceCandidate(null);
@@ -648,11 +681,11 @@ export default function Home() {
     const remaining = places.filter((place) => placeKey(place.placeId, place.destination ?? 'Madri') !== key);
     setPlaces(remaining);
     try {
-      const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
-      localStorage.setItem(removedPlacesStorageKey, JSON.stringify(Array.from(new Set([...removed, key]))));
-      const notes = JSON.parse(localStorage.getItem('roamly-notes') ?? '{}') as Record<string, string>;
+      const removed = JSON.parse(localItineraryStorage().getItem(removedPlacesStorageKey) ?? '[]') as string[];
+      localItineraryStorage().setItem(removedPlacesStorageKey, JSON.stringify(Array.from(new Set([...removed, key]))));
+      const notes = JSON.parse(localItineraryStorage().getItem('roamly-notes') ?? '{}') as Record<string, string>;
       delete notes[selected.id];
-      localStorage.setItem('roamly-notes', JSON.stringify(notes));
+      localItineraryStorage().setItem('roamly-notes', JSON.stringify(notes));
     } catch { /* The React state still removes the place for this session. */ }
     const nextSelected = remaining.find((place) => (place.destination ?? 'Madri') === currentMap);
     setSelectedId(nextSelected?.id ?? '');
@@ -668,12 +701,12 @@ export default function Home() {
     const deletedPlaces = places.filter((place) => (place.destination ?? 'Madri') === mapPendingDelete);
     const remainingPlaces = places.filter((place) => (place.destination ?? 'Madri') !== mapPendingDelete);
     try {
-      const removed = JSON.parse(localStorage.getItem(removedPlacesStorageKey) ?? '[]') as string[];
+      const removed = JSON.parse(localItineraryStorage().getItem(removedPlacesStorageKey) ?? '[]') as string[];
       const deletedKeys = deletedPlaces.map((place) => placeKey(place.placeId, place.destination ?? 'Madri'));
-      localStorage.setItem(removedPlacesStorageKey, JSON.stringify(Array.from(new Set([...removed, ...deletedKeys]))));
-      const notes = JSON.parse(localStorage.getItem('roamly-notes') ?? '{}') as Record<string, string>;
+      localItineraryStorage().setItem(removedPlacesStorageKey, JSON.stringify(Array.from(new Set([...removed, ...deletedKeys]))));
+      const notes = JSON.parse(localItineraryStorage().getItem('roamly-notes') ?? '{}') as Record<string, string>;
       deletedPlaces.forEach((place) => delete notes[place.id]);
-      localStorage.setItem('roamly-notes', JSON.stringify(notes));
+      localItineraryStorage().setItem('roamly-notes', JSON.stringify(notes));
     } catch { /* The React state still removes the map for this session. */ }
     setMaps(remainingMaps);
     setPlaces(remainingPlaces);
@@ -697,12 +730,29 @@ export default function Home() {
   }
 
   async function logout() {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    if (!authUser || !accountActiveRef.current) return;
+    const transition = ++accountTransitionRef.current;
+    const previousCloudOwner = cloudLoadedForUserRef.current;
+    accountActiveRef.current = false;
     cloudLoadedForUserRef.current = '';
-    setAuthUser(null);
-    setSyncStatus('idle');
-    setAuthOpen(false);
-    setToast(language === 'es' ? 'Cerraste sesión. Los itinerarios siguen guardados en el dispositivo.' : language === 'en' ? 'You signed out. Your itineraries remain saved on this device.' : 'Você saiu da conta. Os roteiros continuam salvos no aparelho.');
+    setAuthLoading(true);
+    try {
+      const token = await authChallenge();
+      const response = await accountFetch(authUser.id, '/api/auth/logout', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Roamly-CSRF': token }, body: '{}',
+      });
+      if (!response.ok) throw new Error('Não foi possível sair. Tente novamente.');
+      announceAccountChange();
+      reloadForAccountChange();
+    } catch (error) {
+      if (transition !== accountTransitionRef.current) return;
+      if (error instanceof AccountChangedError) { reloadForAccountChange(); return; }
+      accountActiveRef.current = true;
+      cloudLoadedForUserRef.current = previousCloudOwner;
+      if (previousCloudOwner !== authUser.id) setSyncAttempt((attempt) => attempt + 1);
+      setAuthError(error instanceof Error ? error.message : 'Não foi possível sair');
+      setAuthLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -710,6 +760,8 @@ export default function Home() {
     const timer = window.setTimeout(() => setToast(''), 2800);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  if (!storageReady) return <main className="app-shell" aria-busy="true"><p role="status">{language === 'es' ? 'Cargando tus itinerarios…' : language === 'en' ? 'Loading your itineraries…' : 'Carregando seus roteiros…'}</p></main>;
 
   return (
     <main className="app-shell">
@@ -856,7 +908,8 @@ export default function Home() {
               <>
                 <div className="account-card"><span className="account-avatar">{userInitials(authUser.name)}</span><span><strong>{authUser.name}</strong><small>{authUser.email}</small></span></div>
                 <div className={`account-sync ${syncStatus}`}><ShieldCheck size={18} /><span><strong>{syncStatus === 'synced' ? t.cloudSaved : syncStatus === 'error' ? t.couldNotSync : t.syncingItineraries}</strong><small>{t.linkedGoogle}</small></span></div>
-                <button className="logout-button" onClick={logout}><LogOut size={17} /> {t.logout}</button>
+                {authError && <p role="alert">{authError}</p>}
+                <button className="logout-button" onClick={logout} disabled={authLoading}><LogOut size={17} /> {t.logout}</button>
               </>
             ) : (
               <>
@@ -1393,8 +1446,40 @@ function loadGoogleIdentity(): Promise<GoogleIdentityApi> {
   });
 }
 
-async function saveCloudState(maps: string[], currentMap: string, places: Place[]) {
-  const response = await fetch('/api/sync', {
+function restoreLocalItinerary(storage: ItineraryStorage, guest: boolean): { maps: string[]; currentMap: string; places: Place[] } {
+  const fallback = { maps: guest ? ['Madri'] : [], currentMap: guest ? 'Madri' : '', places: guest ? initialPlaces : [] };
+  try {
+    const savedMaps = JSON.parse(storage.getItem('roamly-maps') ?? 'null') as string[] | null;
+    const maps = Array.isArray(savedMaps) ? Array.from(new Set(savedMaps)) : fallback.maps;
+    const savedCurrent = storage.getItem('roamly-current-map');
+    const currentMap = savedCurrent && maps.includes(savedCurrent) ? savedCurrent : maps[0] ?? '';
+    const notes = JSON.parse(storage.getItem('roamly-notes') ?? '{}') as Record<string, string>;
+    const refs = JSON.parse(storage.getItem('roamly-place-refs') ?? '[]') as StoredPlaceRef[];
+    const removed = new Set((JSON.parse(storage.getItem(removedPlacesStorageKey) ?? '[]') as string[]).map((key) => {
+      const separator = key.indexOf(':');
+      return separator < 0 ? key : `${legacyPlaceIds[key.slice(0, separator)] ?? key.slice(0, separator)}${key.slice(separator)}`;
+    }));
+    const byKey = new Map(refs.map((ref) => [placeKey(ref.placeId, ref.destination), ref]));
+    const seeds = fallback.places.map((place) => {
+      const saved = byKey.get(placeKey(place.placeId, place.destination ?? 'Madri'));
+      return { ...place, ...saved, id: place.id, placeId: place.placeId, destination: place.destination,
+        note: notes[place.id] ?? saved?.note ?? place.note, photo: saved?.photo || place.photo };
+    });
+    const known = new Set(seeds.map((place) => placeKey(place.placeId, place.destination ?? 'Madri')));
+    const restored: Place[] = refs.filter((ref) => !known.has(placeKey(ref.placeId, ref.destination))).map((ref, index) => ({
+      ...ref, id: ref.id, placeId: legacyPlaceIds[ref.placeId] ?? ref.placeId, destination: ref.destination,
+      note: notes[ref.id] ?? ref.note ?? '', name: ref.name ?? 'Carregando lugar…', category: ref.category ?? 'Google Places',
+      address: ref.address ?? '', hours: ref.hours ?? 'Consultando horários', status: ref.status ?? 'closed',
+      statusLabel: ref.statusLabel ?? 'Atualizando', distance: ref.distance ?? '—', photo: ref.photo ?? '',
+      x: ref.x ?? 45 + index * 4, y: ref.y ?? 45 + index * 3, rating: ref.rating ?? '—',
+    }));
+    return { maps, currentMap, places: dedupePlaces([...seeds, ...restored]).filter((place) =>
+      maps.includes(place.destination ?? 'Madri') && !removed.has(placeKey(place.placeId, place.destination ?? 'Madri'))) };
+  } catch { return fallback; }
+}
+
+async function saveCloudState(owner: string, maps: string[], currentMap: string, places: Place[]) {
+  const response = await accountFetch(owner, '/api/sync', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ maps, currentMap, places: dedupePlaces(places), updatedAt: Date.now() }),
