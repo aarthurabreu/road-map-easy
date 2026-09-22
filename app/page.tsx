@@ -766,7 +766,7 @@ export default function Home() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand-lockup" aria-label="Roamly"><span><Compass size={20} /></span><strong>Roamly</strong></div>
+        <div className="brand-lockup" aria-label="Easy Road Map"><span><Compass size={20} /></span><strong>Easy Road Map</strong></div>
         <button className="trip-switcher" onClick={() => setMapsOpen(true)} aria-label={t.switchTrip}>
           <span className="trip-pin"><MapPin size={17} fill="currentColor" /></span>
           <span><small>{t.itinerary}</small><strong>{currentMap || t.createMap}</strong></span><ChevronDown size={17} />

@@ -11,10 +11,10 @@ const themeBootstrap = `(function(){var t;try{t=localStorage.getItem('roamly-the
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://roamly-trip-guide-arthur.arthurmaquizito.chatgpt.site'),
-  title: 'Roamly — Seu guia de viagem',
+  title: 'Easy Road Map — Seu guia de viagem',
   description: 'Organize lugares, veja o que está aberto e explore cada destino com um mapa feito para a sua viagem.',
-  openGraph: { title: 'Roamly — Seu guia de viagem', description: 'Todos os lugares da sua viagem em um mapa simples e inteligente.', type: 'website', images: [{ url: '/og.png', width: 1200, height: 630, alt: 'Roamly — Sua viagem, toda no mapa.' }] },
-  twitter: { card: 'summary_large_image', title: 'Roamly — Seu guia de viagem', description: 'Todos os lugares da sua viagem em um mapa simples e inteligente.', images: ['/og.png'] },
+  openGraph: { title: 'Easy Road Map — Seu guia de viagem', description: 'Todos os lugares da sua viagem em um mapa simples e inteligente.', type: 'website', images: [{ url: '/og.png', width: 1200, height: 630, alt: 'Easy Road Map — Sua viagem, toda no mapa.' }] },
+  twitter: { card: 'summary_large_image', title: 'Easy Road Map — Seu guia de viagem', description: 'Todos os lugares da sua viagem em um mapa simples e inteligente.', images: ['/og.png'] },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
