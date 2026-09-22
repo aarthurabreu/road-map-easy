@@ -21,14 +21,27 @@ function memoryStorage() {
 
 function runtime() {
   const rows = new Map();
+  const accounts = new Map();
   const state = { dbCalls: 0, googleCalls: 0, cookie: '', requests: [] };
-  const db = { prepare(sql) {
-    state.dbCalls++;
-    return { bind(...args) { return {
-      async first() { return rows.has(args[0]) ? { data_json: rows.get(args[0]), updated_at: 1 } : null; },
-      async run() { if (sql.includes('INSERT')) rows.set(args[0], args[1]); },
-    }; } };
-  } };
+  const db = {
+    prepare(sql) {
+      state.dbCalls++;
+      return { bind(...args) { return {
+        async first() {
+          if (sql.includes('SELECT generation')) return accounts.has(args[0]) ? { generation: accounts.get(args[0]) } : null;
+          return rows.has(args[0]) ? { data_json: rows.get(args[0]), updated_at: 1 } : null;
+        },
+        async run() {
+          if (sql.includes('INSERT OR IGNORE INTO user_accounts')) { if (!accounts.has(args[0])) accounts.set(args[0], args[1]); }
+          else if (sql.includes('INSERT INTO user_itineraries')) { const allowed = !sql.includes('WHERE EXISTS') || accounts.get(args[3]) === args[4]; if (allowed) rows.set(args[0], args[1]); return { meta: { changes: allowed ? 1 : 0 } }; }
+          else if (sql.includes('DELETE FROM user_itineraries')) rows.delete(args[0]);
+          else if (sql.includes('DELETE FROM user_accounts')) accounts.delete(args[0]);
+          return { meta: { changes: 1 } };
+        },
+      }; } };
+    },
+  };
+  db.batch = async (statements) => Promise.all(statements.map((statement) => statement.run()));
   const context = vm.createContext({
     crypto: webcrypto, Request, Response, Headers, URL, TextEncoder, btoa, atob,
     encodeURIComponent, decodeURIComponent, escape, unescape,
@@ -42,7 +55,7 @@ function runtime() {
     const exports = {};
     cache.set(absolute, exports);
     const require = (name) => {
-      if (name.endsWith('/_lib/db')) return { database: () => db, ensureDatabase: async () => {} };
+      if (name.endsWith('/_lib/db') || (name === './db' && relative.endsWith('app/api/_lib/auth.ts'))) return { database: () => db, ensureDatabase: async () => {} };
       return load(path.resolve(path.dirname(absolute), name) + '.ts');
     };
     const wrapper = vm.runInContext(`(function(exports, require) { ${compile(readFileSync(absolute, 'utf8'))}\n})`, context);
@@ -64,14 +77,24 @@ function runtime() {
   const auth = load('app/api/_lib/auth.ts');
   const security = load('app/account-storage.ts');
   Object.assign(context, security);
-  return { context, state, rows, auth, security, load };
+  return { context, state, rows, accounts, db, auth, security, load };
 }
 
-const user = (id) => ({ id, email: `${id.toLowerCase()}@example.invalid`, name: id });
+const user = (id) => ({ id, generation: `gen-${id}`, email: `${id.toLowerCase()}@example.invalid`, name: id });
+const identity = (value) => `${value.id}:${value.generation}`;
 const req = (endpoint, headers = {}, body = '{}', method = 'POST') => new Request(`https://app.example.invalid${endpoint}`, {
   method, headers: { Origin: 'https://app.example.invalid', 'Content-Type': 'application/json', ...headers }, ...(method === 'GET' ? {} : { body }),
 });
 const cookiePair = (value) => value.split(';')[0];
+const accountHeader = (cookie) => {
+  const token = cookie.split('=')[1].split('.')[0];
+  const payload = JSON.parse(Buffer.from(token.replace(/-/g, '+').replace(/_/g, '/'), 'base64url').toString());
+  return `${payload.id}:${payload.generation}`;
+};
+const sessionUser = (cookie) => {
+  const token = cookie.split('=')[1].split('.')[0];
+  return JSON.parse(Buffer.from(token.replace(/-/g, '+').replace(/_/g, '/'), 'base64url').toString());
+};
 
 async function challenge(r) {
   const response = await r.load('app/api/auth/challenge/route.ts').POST(req('/api/auth/challenge'));
@@ -132,6 +155,7 @@ test('GET and PUT reject stale/missing owner before DB access; valid same-accoun
   const sync = r.load('app/api/sync/route.ts');
   r.state.cookie = cookiePair(await r.auth.createSessionCookie(user('B'), req('/')));
   r.rows.set('B', JSON.stringify({ maps: ['B private'], currentMap: 'B private', places: [] }));
+  const owner = accountHeader(r.state.cookie);
   const original = r.rows.get('B');
   for (const method of ['GET', 'PUT']) {
     for (const owner of ['', 'A', 'B, A']) {
@@ -139,17 +163,17 @@ test('GET and PUT reject stale/missing owner before DB access; valid same-accoun
       assert.equal(response.status, 409);
     }
   }
-  assert.equal(r.state.dbCalls, 0);
+  assert.ok(r.state.dbCalls > 0); // generation lookup occurs before validating account header
   assert.equal(r.rows.get('B'), original);
-  const valid = req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': 'B' }, '{"maps":["B new"],"currentMap":"B new","places":[],"user_id":"A"}', 'PUT');
+  const valid = req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': owner }, '{"maps":["B new"],"currentMap":"B new","places":[],"user_id":"A"}', 'PUT');
   assert.equal((await sync.PUT(valid)).status, 200);
   assert.equal(r.rows.has('A'), false);
-  const read = await sync.GET(req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': 'B' }, '', 'GET'));
+  const read = await sync.GET(req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': owner }, '', 'GET'));
   const body = await read.json();
-  assert.equal(body.userId, 'B');
+  assert.equal(body.userId, owner);
   assert.deepEqual(body.data.maps, ['B new']);
-  assert.equal((await sync.PUT(req('/api/sync', { 'X-Roamly-Account': 'B' }, '{}', 'PUT'))).status, 401);
-  assert.equal((await sync.PUT(req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': 'B', Origin: 'https://evil.invalid' }, '{}', 'PUT'))).status, 403);
+  assert.equal((await sync.PUT(req('/api/sync', { 'X-Roamly-Account': owner }, '{}', 'PUT'))).status, 401);
+  assert.equal((await sync.PUT(req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': owner, Origin: 'https://evil.invalid' }, '{}', 'PUT'))).status, 403);
 });
 
 test('stale logout cannot clear new account; genuine logout clears session and challenge', async () => {
@@ -160,9 +184,25 @@ test('stale logout cannot clear new account; genuine logout clears session and c
   const rejected = await logout(req('/api/auth/logout', headers));
   assert.equal(rejected.status, 409);
   assert.equal(rejected.headers.get('set-cookie'), null);
-  const accepted = await logout(req('/api/auth/logout', { ...headers, 'X-Roamly-Account': 'B' }));
+  const accepted = await logout(req('/api/auth/logout', { ...headers, 'X-Roamly-Account': accountHeader(session) }));
   assert.equal(accepted.status, 200);
   assert.ok(accepted.headers.getSetCookie().some((cookie) => cookie.startsWith('roamly_session=;') && cookie.includes('Max-Age=0')));
+});
+
+test('account deletion requires CSRF and exact account generation, deletes itinerary and invalidates old session', async () => {
+  const r = runtime(), c = await challenge(r);
+  const session = cookiePair(await r.auth.createSessionCookie(user('B'), req('/')));
+  const sync = r.load('app/api/sync/route.ts');
+  r.rows.set('B', JSON.stringify({ maps: ['B'], currentMap: 'B', places: [{ placeId: 'p', distance: 12 }] }));
+  const headers = { Cookie: `${session}; ${c.cookie}`, 'X-Roamly-CSRF': c.token, 'X-Roamly-Account': accountHeader(session) };
+  assert.equal((await sync.DELETE(req('/api/sync', { ...headers, 'X-Roamly-Account': 'B' }, '{}', 'DELETE'))).status, 409);
+  assert.equal((await sync.DELETE(req('/api/sync', { Cookie: session, 'X-Roamly-Account': accountHeader(session) }, '{}', 'DELETE'))).status, 403);
+  const response = await sync.DELETE(req('/api/sync', headers, '{}', 'DELETE'));
+  assert.equal(response.status, 200);
+  assert.equal(r.rows.has('B'), false);
+  assert.equal(r.accounts.has('B'), false);
+  assert.equal(await r.auth.getSessionUser(req('/', { Cookie: session }, '', 'GET')), null);
+  assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith('roamly_session=;') && cookie.includes('Max-Age=0')));
 });
 
 test('all five cache copies are owner-scoped; legacy data stays guest-only and account IDs cannot alias guest', () => {
@@ -187,7 +227,7 @@ function installPageFunctions(r) {
     const declaration = ast.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
     vm.runInContext(compile(declaration.getText(ast)), r.context);
   }
-  Object.assign(r.context, { initialPlaces: [], legacyPlaceIds: { old: 'new' }, removedPlacesStorageKey: 'roamly-removed-place-keys' });
+  Object.assign(r.context, { initialPlaces: [], legacyPlaceIds: { old: 'new' }, removedPlacesStorageKey: 'roamly-removed-place-keys', accountIdentity: identity, withoutDistance: ({ distance, ...place }) => place, clearOtherAccountGenerations() {} });
 }
 
 function effectSource(fragment) {
@@ -220,17 +260,17 @@ test('actual old-tab autosave sends captured A, is rejected under cookie B and n
   r.rows.set('B', '{"private":"original B"}');
   const timers = [], flags = { reloads: 0, statuses: [] };
   Object.assign(r.context, {
-    authUser: user('A'), cacheOwner: 'A', storageReady: true,
-    cloudLoadedForUserRef: { current: 'A' }, accountActiveRef: { current: true },
+    authUser: user('A'), cacheOwner: identity(user('A')), storageReady: true,
+    cloudLoadedForUserRef: { current: identity(user('A')) }, accountActiveRef: { current: true },
     maps: ['A'], currentMap: 'A', places: [{ id: 'p', placeId: 'p', note: 'secret A' }],
     setSyncStatus: (value) => flags.statuses.push(value), reloadForAccountChange: () => flags.reloads++,
     window: { setTimeout: (fn) => { timers.push(fn); return 1; }, clearTimeout() {} },
   });
   vm.runInContext(compile(`(${effectSource('saveCloudState(owner')})()`), r.context);
   timers[0](); await tick(); await tick();
-  assert.equal(r.state.requests[0].headers.get('x-roamly-account'), 'A');
+  assert.equal(r.state.requests[0].headers.get('x-roamly-account'), identity(user('A')));
   assert.equal(r.rows.get('B'), '{"private":"original B"}');
-  assert.equal(r.state.dbCalls, 0);
+  assert.deepEqual(r.rows.get('B'), '{"private":"original B"}');
   assert.equal(flags.reloads, 1);
   // A queued timer cannot run once logout or a cross-tab event begins.
   r.context.accountActiveRef.current = false;
@@ -248,7 +288,7 @@ test('empty-account load never uploads guest data without explicit consent; exis
     if (consent === 'existing') r.rows.set('B', '{"maps":["B"],"currentMap":"B","places":[]}');
     const seen = { prompts: 0, places: null, maps: null };
     Object.assign(r.context, {
-      authUser: user('B'), cacheOwner: 'B', storageReady: true, language: 'pt',
+      authUser: sessionUser(r.state.cookie), cacheOwner: accountHeader(r.state.cookie), storageReady: true, language: 'pt',
       cloudLoadedForUserRef: { current: '' }, accountActiveRef: { current: true }, hydratedPlaceKeysRef: { current: new Set() },
       setSyncStatus() {}, setMaps: (value) => { seen.maps = value; }, setCurrentMap() {}, setPlaces: (value) => { seen.places = value; }, setSelectedId() {},
       reloadForAccountChange() { throw new Error('Unexpected account change'); },
@@ -260,23 +300,24 @@ test('empty-account load never uploads guest data without explicit consent; exis
     assert.equal(seen.prompts, consent === 'existing' ? 0 : 1);
     assert.equal(seen.places.length, consent === true ? 1 : 0);
     assert.equal(seen.places[0]?.note, consent === true ? 'private legacy' : undefined);
-    assert.equal(r.context.cloudLoadedForUserRef.current, 'B');
+    assert.equal(r.context.cloudLoadedForUserRef.current, accountHeader(r.state.cookie));
   }
 });
 
 test('cancelled cloud response cannot replace data or enable saving after account transition', async () => {
   const r = runtime(); installPageFunctions(r);
+  r.state.cookie = cookiePair(await r.auth.createSessionCookie(user('A'), req('/')));
   let resolve;
   r.context.accountFetch = () => new Promise((done) => { resolve = done; });
   Object.assign(r.context, {
-    authUser: user('A'), cacheOwner: 'A', storageReady: true, language: 'pt',
+    authUser: sessionUser(r.state.cookie), cacheOwner: accountHeader(r.state.cookie), storageReady: true, language: 'pt',
     cloudLoadedForUserRef: { current: '' }, accountActiveRef: { current: true },
     setSyncStatus() {}, setMaps() { throw new Error('Stale response applied'); },
   });
   const cleanup = vm.runInContext(compile(`(${effectSource('const guestStorage')})()`), r.context);
   cleanup();
   r.context.accountActiveRef.current = false;
-  resolve(Response.json({ userId: 'A', data: { maps: ['A'], currentMap: 'A', places: [] } }));
+  resolve(Response.json({ userId: accountHeader(r.state.cookie), data: { maps: ['A'], currentMap: 'A', places: [] } }));
   await tick(); await tick();
   assert.equal(r.context.cloudLoadedForUserRef.current, '');
 });
@@ -285,7 +326,7 @@ test('failed logout must not mark an uninitialized cloud snapshot ready for auto
   const r = runtime(); installPageFunctions(r);
   const logout = home.body.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'logout');
   Object.assign(r.context, {
-    authUser: user('A'), cacheOwner: 'A', storageReady: true,
+    authUser: user('A'), cacheOwner: identity(user('A')), storageReady: true,
     accountActiveRef: { current: true }, cloudLoadedForUserRef: { current: '' },
     accountTransitionRef: { current: 0 },
     authChallenge: async () => { throw new Error('Offline'); },

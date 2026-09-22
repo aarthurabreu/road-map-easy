@@ -1,9 +1,12 @@
+import { database } from './db';
+
 export type GoogleUser = {
   id: string;
   email: string;
   name: string;
   picture?: string;
 };
+export type SessionUser = GoogleUser & { generation: string };
 
 type GoogleTokenInfo = {
   aud?: string;
@@ -105,7 +108,11 @@ export async function verifyGoogleCredential(credential: string): Promise<Google
 }
 
 export async function createSessionCookie(user: GoogleUser, request: Request) {
-  const payload = encode(JSON.stringify({ ...user, exp: Math.floor(Date.now() / 1000) + sessionLifetimeSeconds }));
+  const db = database();
+  await db.prepare('INSERT OR IGNORE INTO user_accounts (user_id, generation) VALUES (?, ?)').bind(user.id, crypto.randomUUID()).run();
+  const account = await db.prepare('SELECT generation FROM user_accounts WHERE user_id = ?').bind(user.id).first<{ generation: string }>();
+  if (!account) throw new Error('Não foi possível iniciar a conta. Tente novamente.');
+  const payload = encode(JSON.stringify({ ...user, generation: account.generation, exp: Math.floor(Date.now() / 1000) + sessionLifetimeSeconds }));
   const signed = `${payload}.${await signature(payload)}`;
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
   return `${cookieName}=${signed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionLifetimeSeconds}${secure}`;
@@ -116,7 +123,7 @@ export function clearSessionCookie(request: Request) {
   return `${cookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
 }
 
-export async function getSessionUser(request: Request): Promise<GoogleUser | null> {
+export async function getSessionUser(request: Request): Promise<SessionUser | null> {
   const cookieHeader = request.headers.get('cookie') ?? '';
   const value = cookieHeader.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
   if (!value) return null;
@@ -126,9 +133,11 @@ export async function getSessionUser(request: Request): Promise<GoogleUser | nul
   const receivedSignature = value.slice(separator + 1);
   try {
     if (!timingSafeEqual(receivedSignature, await signature(payload))) return null;
-    const parsed = JSON.parse(decode(payload)) as GoogleUser & { exp?: number };
-    if (!parsed.id || !parsed.email || !parsed.exp || parsed.exp <= Math.floor(Date.now() / 1000)) return null;
-    return { id: parsed.id, email: parsed.email, name: parsed.name || parsed.email, picture: parsed.picture };
+    const parsed = JSON.parse(decode(payload)) as SessionUser & { exp?: number };
+    if (!parsed.id || !parsed.email || !parsed.generation || !parsed.exp || parsed.exp <= Math.floor(Date.now() / 1000)) return null;
+    const account = await database().prepare('SELECT generation FROM user_accounts WHERE user_id = ?').bind(parsed.id).first<{ generation: string }>();
+    if (account?.generation !== parsed.generation) return null;
+    return { id: parsed.id, email: parsed.email, name: parsed.name || parsed.email, picture: parsed.picture, generation: parsed.generation };
   } catch {
     return null;
   }

@@ -1,4 +1,5 @@
-import { createBrowserChallenge, verifyBrowserChallenge, type GoogleUser } from './auth';
+import { createBrowserChallenge, verifyBrowserChallenge, type SessionUser } from './auth';
+import { accountIdentity } from '../../data-privacy';
 
 export function jsonError(error: string, status: number) {
   return Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -22,8 +23,8 @@ export async function checkAuthMutation(request: Request): Promise<Response | nu
   return null;
 }
 
-export function checkExpectedAccount(request: Request, user: GoogleUser): Response | null {
-  return request.headers.get('x-roamly-account') === user.id ? null : jsonError('A conta mudou. Recarregue o roteiro.', 409);
+export function checkExpectedAccount(request: Request, user: SessionUser): Response | null {
+  return request.headers.get('x-roamly-account') === accountIdentity(user) ? null : jsonError('A conta mudou. Recarregue o roteiro.', 409);
 }
 
 export { createBrowserChallenge };

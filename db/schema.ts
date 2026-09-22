@@ -5,3 +5,10 @@ export const createUserItinerariesTable = `
     updated_at INTEGER NOT NULL
   )
 `;
+
+export const createUserAccountsTable = `
+  CREATE TABLE IF NOT EXISTS user_accounts (
+    user_id TEXT PRIMARY KEY NOT NULL,
+    generation TEXT NOT NULL
+  )
+`;

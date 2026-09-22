@@ -33,11 +33,12 @@ export async function authChallenge() {
 
 export const accountChangeKey = 'roamly-account-change';
 
-export function announceAccountChange() {
-  try { localStorage.setItem(accountChangeKey, crypto.randomUUID()); } catch { /* Server guards still enforce account isolation. */ }
+export function announceAccountChange(deletedUserId?: string) {
+  const message = { nonce: crypto.randomUUID(), ...(deletedUserId ? { deletedUserId } : {}) };
+  try { localStorage.setItem(accountChangeKey, JSON.stringify(message)); } catch { /* Server guards still enforce account isolation. */ }
   if (typeof BroadcastChannel !== 'undefined') {
     const channel = new BroadcastChannel(accountChangeKey);
-    channel.postMessage('changed');
+    channel.postMessage(message);
     channel.close();
   }
 }

@@ -14,6 +14,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { languageLocales, languageOptions, normalizeLanguage, translations, type Copy, type Language } from './i18n';
 import { createMarkerRegistry } from './map-markers';
 import { accountStorage, accountFetch, AccountChangedError, authChallenge, accountChangeKey, announceAccountChange, type ItineraryStorage } from './account-storage';
+import { accountIdentity, clearItineraryCache, clearOtherAccountGenerations, withoutDistance } from './data-privacy';
+import { PrivacyDialog, LocationDialog } from './privacy-dialog';
+import { privacyCopy } from './privacy-copy';
 
 type Theme = 'light' | 'dark';
 
@@ -28,7 +31,7 @@ type Place = {
 type StoredPlaceRef = Partial<Place> & Pick<Place, 'id' | 'placeId'> & { destination: string };
 
 type MapsStatus = 'loading' | 'ready' | 'needs-key' | 'error';
-type AuthUser = { id: string; email: string; name: string; picture?: string };
+type AuthUser = { id: string; email: string; name: string; picture?: string; generation: string };
 type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error';
 type GoogleIdentityApi = {
   initialize: (options: { client_id: string; callback: (response: { credential?: string }) => void }) => void;
@@ -140,6 +143,8 @@ export default function Home() {
   const [mapPlaceCandidate, setMapPlaceCandidate] = useState<Place | null>(null);
   const [mapPlaceLoading, setMapPlaceLoading] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
+  const [locationPromptOpen, setLocationPromptOpen] = useState(false);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
@@ -152,7 +157,8 @@ export default function Home() {
   const sessionTokenRef = useRef<google.maps.places.AutocompleteSessionToken | null>(null);
   const addingPlaceKeysRef = useRef(new Set<string>());
   const hydratedPlaceKeysRef = useRef(new Set<string>());
-  const locationRequestedRef = useRef(false);
+  const locationAllowedRef = useRef(false);
+  const locationRequestRef = useRef(0);
   const googleButtonRef = useRef<HTMLDivElement>(null);
   const cloudLoadedForUserRef = useRef('');
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -180,6 +186,7 @@ export default function Home() {
   }
 
   const updateUserPosition = useCallback((next: google.maps.LatLngLiteral) => {
+    if (!locationAllowedRef.current) return;
     // Ignore sub-metre GPS noise; distances and the blue dot remain live as you move.
     setUserPosition((previous) => previous && haversineMeters(previous, next) < 1 ? previous : next);
   }, []);
@@ -232,7 +239,7 @@ export default function Home() {
     const storage = accountStorage(localStorage, cacheOwner);
     storage.setItem('roamly-maps', JSON.stringify(maps));
     storage.setItem('roamly-current-map', currentMap);
-    storage.setItem('roamly-place-refs', JSON.stringify(dedupePlaces(places).map((place) => ({ ...place, destination: place.destination ?? 'Madri' }))));
+    storage.setItem('roamly-place-refs', JSON.stringify(dedupePlaces(places).map((place) => ({ ...withoutDistance(place), distance: undefined, destination: place.destination ?? 'Madri' }))));
     storage.setItem('roamly-notes', JSON.stringify(Object.fromEntries(places.map((place) => [place.id, place.note]))));
   }, [maps, places, currentMap, storageReady, cacheOwner]);
 
@@ -257,7 +264,7 @@ export default function Home() {
       if (cancelled || !accountActiveRef.current) return;
       setOauthClientId(config.clientId ?? '');
       setAuthUser(session.user ?? null);
-      setCacheOwner(session.user?.id ?? null);
+      setCacheOwner(session.user ? accountIdentity(session.user) : null);
       setAuthLoading(false);
     });
     return () => { cancelled = true; };
@@ -271,13 +278,21 @@ export default function Home() {
         const response = await fetch('/api/auth/session', { cache: 'no-store' });
         if (!response.ok) return;
         const session = await response.json() as { user?: AuthUser | null };
-        if (!cancelled && (session.user?.id ?? null) !== cacheOwner) reloadForAccountChange();
+        if (!cancelled && (session.user ? accountIdentity(session.user) : null) !== cacheOwner) reloadForAccountChange();
       } catch { /* Offline edits remain scoped to this account; writes still check the cookie on the server. */ }
     };
     const visibility = () => { if (document.visibilityState === 'visible') void recheck(); };
-    const storage = (event: StorageEvent) => { if (event.key === accountChangeKey) reloadForAccountChange(); };
+    const handleAccountChange = (message: unknown) => {
+      const detail = message && typeof message === 'object' ? message as { deletedUserId?: string } : {};
+      if (detail.deletedUserId && authUser?.id === detail.deletedUserId) clearItineraryCache(localStorage, detail.deletedUserId);
+      reloadForAccountChange();
+    };
+    const storage = (event: StorageEvent) => {
+      if (event.key !== accountChangeKey) return;
+      try { handleAccountChange(JSON.parse(event.newValue ?? 'null')); } catch { handleAccountChange(null); }
+    };
     const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(accountChangeKey);
-    if (channel) channel.onmessage = reloadForAccountChange;
+    if (channel) channel.onmessage = (event) => handleAccountChange(event.data);
     window.addEventListener('focus', recheck);
     window.addEventListener('storage', storage);
     document.addEventListener('visibilitychange', visibility);
@@ -288,7 +303,7 @@ export default function Home() {
       window.removeEventListener('storage', storage);
       document.removeEventListener('visibilitychange', visibility);
     };
-  }, [cacheOwner, reloadForAccountChange]);
+  }, [authUser, cacheOwner, reloadForAccountChange]);
 
   useEffect(() => {
     if (!authOpen || authUser || !oauthClientId || !googleButtonRef.current) return;
@@ -303,9 +318,10 @@ export default function Home() {
   }, [authOpen, authUser, handleGoogleCredential, language, locale, oauthClientId]);
 
   useEffect(() => {
-    if (!authUser || !storageReady || cacheOwner !== authUser.id || cloudLoadedForUserRef.current === authUser.id) return;
+    if (!authUser || !storageReady || cacheOwner !== accountIdentity(authUser) || cloudLoadedForUserRef.current === accountIdentity(authUser)) return;
     let cancelled = false;
-    const owner = authUser.id;
+    const owner = accountIdentity(authUser);
+    clearOtherAccountGenerations(localStorage, authUser);
     setSyncStatus('syncing');
     accountFetch(owner, '/api/sync').then(async (response) => {
       if (!response.ok) throw new Error('Não foi possível carregar seus roteiros');
@@ -316,7 +332,7 @@ export default function Home() {
       if (cancelled || !accountActiveRef.current) return;
       let next = data;
       if (!next) {
-        // This account's own offline cache may sync automatically, never another owner's.
+        // Offline work is reused only inside the current, non-deleted account generation.
         next = restoreLocalItinerary(accountStorage(localStorage, owner), false);
         const guestStorage = accountStorage(localStorage, null);
         if (next.maps.length === 0 && guestStorage.getItem('roamly-maps') !== null) {
@@ -331,7 +347,7 @@ export default function Home() {
       if (cancelled || !accountActiveRef.current) return;
       const nextMaps = Array.from(new Set(next.maps));
       const nextMap = next.currentMap && nextMaps.includes(next.currentMap) ? next.currentMap : nextMaps[0] ?? '';
-      const nextPlaces = dedupePlaces(next.places);
+      const nextPlaces = dedupePlaces(next.places).map((place) => ({ ...place, distance: '—' }));
       // Clear this owner's obsolete note/tombstone copies when replacing its snapshot.
       const storage = accountStorage(localStorage, owner);
       storage.setItem('roamly-notes', JSON.stringify(Object.fromEntries(nextPlaces.map((place) => [place.id, place.note]))));
@@ -351,12 +367,12 @@ export default function Home() {
     return () => { cancelled = true; };
     // Initialize each account once; subsequent edits are handled by the bound autosave.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authUser?.id, cacheOwner, storageReady, syncAttempt, reloadForAccountChange]);
+  }, [authUser?.id, authUser?.generation, cacheOwner, storageReady, syncAttempt, reloadForAccountChange]);
 
   useEffect(() => {
-    if (!authUser || !storageReady || cacheOwner !== authUser.id || cloudLoadedForUserRef.current !== authUser.id || !accountActiveRef.current) return;
+    if (!authUser || !storageReady || cacheOwner !== accountIdentity(authUser) || cloudLoadedForUserRef.current !== accountIdentity(authUser) || !accountActiveRef.current) return;
     let cancelled = false;
-    const owner = authUser.id;
+    const owner = accountIdentity(authUser);
     const timer = window.setTimeout(() => {
       if (!accountActiveRef.current) return;
       setSyncStatus('syncing');
@@ -387,26 +403,6 @@ export default function Home() {
     });
     return () => { cancelled = true; };
   }, [apiKey, language]);
-
-  useEffect(() => {
-    if (mapsStatus !== 'ready' || userPosition || locationRequestedRef.current || !navigator.geolocation) return;
-    locationRequestedRef.current = true;
-    setIsLocating(true);
-    setLocationLabel(t.calculatingDistances);
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setUserPosition({ lat: position.coords.latitude, lng: position.coords.longitude });
-        setTrackLocation(true);
-        setLocationLabel(t.liveLocation);
-        setIsLocating(false);
-      },
-      () => {
-        setLocationLabel(language === 'es' ? 'Activa la ubicación para ver distancias' : language === 'en' ? 'Enable location to see distances' : 'Ative a localização para ver distâncias');
-        setIsLocating(false);
-      },
-      { enableHighAccuracy: true, timeout: 12_000, maximumAge: 30_000 },
-    );
-  }, [mapsStatus, userPosition, language, t.calculatingDistances, t.liveLocation]);
 
   useEffect(() => {
     if (mapsStatus !== 'ready' || !storageReady || !currentMap) return;
@@ -529,7 +525,7 @@ export default function Home() {
     setToast(pinColor ? (language === 'es' ? 'Color del pin actualizado' : language === 'en' ? 'Pin color updated' : 'Cor do pin atualizada') : (language === 'es' ? 'Color automático restaurado' : language === 'en' ? 'Automatic color restored' : 'Cor automática restaurada'));
   }
 
-  function useMyLocation() {
+  function requestMyLocation() {
     if (isLocating) return;
     if (userPosition && liveMap) {
       liveMap.panTo(userPosition);
@@ -539,14 +535,31 @@ export default function Home() {
       return;
     }
     if (!navigator.geolocation) { setToast(language === 'es' ? 'Ubicación no disponible en este dispositivo' : language === 'en' ? 'Location is not available on this device' : 'Localização não disponível neste dispositivo'); return; }
+    const requestId = ++locationRequestRef.current;
+    locationAllowedRef.current = true;
     setTrackLocation(true);
     setIsLocating(true);
     setLocationLabel(language === 'es' ? 'Localizando…' : language === 'en' ? 'Locating…' : 'Localizando…');
     navigator.geolocation.getCurrentPosition(
-      (position) => { const next = { lat: position.coords.latitude, lng: position.coords.longitude }; setUserPosition(next); liveMap?.panTo(next); liveMap?.setZoom(16); setLocationLabel(t.liveLocation); setIsLocating(false); setToast(language === 'es' ? 'Mapa centrado en tu ubicación' : language === 'en' ? 'Map centered on your location' : 'Mapa centralizado na sua localização'); },
-      () => { setTrackLocation(false); setLocationLabel(language === 'es' ? 'Ubicación no disponible' : language === 'en' ? 'Location unavailable' : 'Localização indisponível'); setIsLocating(false); setToast(language === 'es' ? 'Permite el acceso a la ubicación para centrar el mapa' : language === 'en' ? 'Allow location access to center the map' : 'Permita o acesso à localização para centralizar o mapa'); },
+      (position) => { if (requestId !== locationRequestRef.current || !locationAllowedRef.current) return; const next = { lat: position.coords.latitude, lng: position.coords.longitude }; setUserPosition(next); liveMap?.panTo(next); liveMap?.setZoom(16); setLocationLabel(t.liveLocation); setIsLocating(false); setToast(language === 'es' ? 'Mapa centrado en tu ubicación' : language === 'en' ? 'Map centered on your location' : 'Mapa centralizado na sua localização'); },
+      () => { if (requestId !== locationRequestRef.current) return; setTrackLocation(false); setLocationLabel(language === 'es' ? 'Ubicación no disponible' : language === 'en' ? 'Location unavailable' : 'Localização indisponível'); setIsLocating(false); setToast(language === 'es' ? 'Permite el acceso a la ubicación para centrar el mapa' : language === 'en' ? 'Allow location access to center the map' : 'Permita o acesso à localização para centralizar o mapa'); },
       { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 },
     );
+  }
+
+  function useMyLocation() {
+    if (isLocating) return;
+    if (!locationAllowedRef.current) { setLocationPromptOpen(true); return; }
+    requestMyLocation();
+  }
+
+  function stopLocationTracking() {
+    locationAllowedRef.current = false;
+    locationRequestRef.current += 1;
+    setTrackLocation(false);
+    setUserPosition(null);
+    setIsLocating(false);
+    setLocationLabel(t.yourLocation);
   }
 
   function openRouteOptions() {
@@ -738,7 +751,7 @@ export default function Home() {
     setAuthLoading(true);
     try {
       const token = await authChallenge();
-      const response = await accountFetch(authUser.id, '/api/auth/logout', {
+      const response = await accountFetch(accountIdentity(authUser), '/api/auth/logout', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Roamly-CSRF': token }, body: '{}',
       });
       if (!response.ok) throw new Error('Não foi possível sair. Tente novamente.');
@@ -749,9 +762,65 @@ export default function Home() {
       if (error instanceof AccountChangedError) { reloadForAccountChange(); return; }
       accountActiveRef.current = true;
       cloudLoadedForUserRef.current = previousCloudOwner;
-      if (previousCloudOwner !== authUser.id) setSyncAttempt((attempt) => attempt + 1);
+      if (previousCloudOwner !== accountIdentity(authUser)) setSyncAttempt((attempt) => attempt + 1);
       setAuthError(error instanceof Error ? error.message : 'Não foi possível sair');
       setAuthLoading(false);
+    }
+  }
+
+  async function exportMyData() {
+    const identity = authUser ? accountIdentity(authUser) : null;
+    let cloudCopy: unknown = null;
+    if (identity) {
+      const response = await accountFetch(identity, '/api/sync');
+      if (!response.ok) throw new Error('Export failed');
+      const payload = await response.json() as { userId?: string; data?: { maps: string[]; currentMap: string; places: Place[] } | null };
+      if (payload.userId !== identity) throw new AccountChangedError('The account changed');
+      cloudCopy = payload.data ? { ...payload.data, places: payload.data.places.map(withoutDistance) } : null;
+    }
+    const content = {
+      app: 'Easy Road Map', version: 1, exportedAt: new Date().toISOString(),
+      account: authUser ? { provider: 'Google', id: authUser.id, name: authUser.name, email: authUser.email } : null,
+      preferences: { theme, language },
+      localItinerary: { maps, currentMap, places: places.map(withoutDistance) },
+      ...(identity ? { cloudItinerary: cloudCopy } : {}),
+    };
+    const blob = new Blob([JSON.stringify(content, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `easy-road-map-dados-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function deleteMyData() {
+    if (!authUser) {
+      clearItineraryCache(localStorage, null);
+      setMaps([]); setCurrentMap(''); setPlaces([]); setSelectedId('');
+      setPrivacyOpen(false); setAuthOpen(false); setToast(privacyCopy[language].deleted);
+      return;
+    }
+    const identity = accountIdentity(authUser);
+    const previousCloudOwner = cloudLoadedForUserRef.current;
+    accountActiveRef.current = false;
+    cloudLoadedForUserRef.current = '';
+    try {
+      const challenge = await authChallenge();
+      const response = await accountFetch(identity, '/api/sync', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json', 'X-Roamly-CSRF': challenge }, body: '{}',
+      });
+      if (!response.ok) throw new Error('Deletion failed');
+      clearItineraryCache(localStorage, authUser.id);
+      stopLocationTracking();
+      announceAccountChange(authUser.id);
+      reloadForAccountChange();
+    } catch (error) {
+      if (!(error instanceof AccountChangedError)) {
+        accountActiveRef.current = true;
+        cloudLoadedForUserRef.current = previousCloudOwner;
+      }
+      throw error;
     }
   }
 
@@ -909,6 +978,7 @@ export default function Home() {
                 <div className="account-card"><span className="account-avatar">{userInitials(authUser.name)}</span><span><strong>{authUser.name}</strong><small>{authUser.email}</small></span></div>
                 <div className={`account-sync ${syncStatus}`}><ShieldCheck size={18} /><span><strong>{syncStatus === 'synced' ? t.cloudSaved : syncStatus === 'error' ? t.couldNotSync : t.syncingItineraries}</strong><small>{t.linkedGoogle}</small></span></div>
                 {authError && <p role="alert">{authError}</p>}
+                <button className="privacy-open-button" onClick={() => { setAuthOpen(false); setPrivacyOpen(true); }}><ShieldCheck size={16} /> {privacyCopy[language].title}</button>
                 <button className="logout-button" onClick={logout} disabled={authLoading}><LogOut size={17} /> {t.logout}</button>
               </>
             ) : (
@@ -919,11 +989,27 @@ export default function Home() {
                 {authError && <p className="auth-error">{authError}</p>}
                 {!oauthClientId && !authLoading && <p className="auth-error">{t.googleNotConfigured}</p>}
                 <p className="auth-privacy"><ShieldCheck size={14} /> {t.googlePrivacy}</p>
+                <button className="privacy-open-button" onClick={() => { setAuthOpen(false); setPrivacyOpen(true); }}><ShieldCheck size={16} /> {privacyCopy[language].title}</button>
               </>
             )}
           </section>
         </div>
       )}
+
+      {privacyOpen && <PrivacyDialog
+        language={language} email={authUser?.email} locationEnabled={locationAllowedRef.current}
+        onClose={() => setPrivacyOpen(false)}
+        onLocation={() => {
+          if (locationAllowedRef.current) stopLocationTracking();
+          else { setPrivacyOpen(false); setLocationPromptOpen(true); }
+        }}
+        onExport={exportMyData} onDelete={deleteMyData}
+      />}
+      {locationPromptOpen && <LocationDialog
+        language={language}
+        onClose={() => setLocationPromptOpen(false)}
+        onAllow={() => { setLocationPromptOpen(false); requestMyLocation(); }}
+      />}
 
       {routeOpen && (
         <div className="modal-backdrop" onClick={() => setRouteOpen(false)}>
@@ -1184,7 +1270,14 @@ function LiveGoogleMap({
   }, [onUserPosition, trackUser]);
 
   useEffect(() => {
-    if (!userPosition || !mapRef.current) return;
+    if (!mapRef.current) return;
+    if (!userPosition) {
+      if (userMarkerRef.current) {
+        userMarkerRef.current.map = null;
+        userMarkerRef.current = null;
+      }
+      return;
+    }
     if (!userMarkerRef.current) {
       const dot = document.createElement('div');
       dot.className = 'live-user-marker';
@@ -1418,9 +1511,6 @@ function formatDistance(meters: number, language: Language) { return meters < 10
 
 function sortableDistance(place: Place, userPosition: google.maps.LatLngLiteral | null) {
   if (userPosition && place.lat != null && place.lng != null) return haversineMeters(userPosition, { lat: place.lat, lng: place.lng });
-  const numericDistance = Number(place.distance.match(/[\d.,]+/)?.[0].replace(',', '.') ?? Number.NaN);
-  if (place.distance.endsWith(' km')) return numericDistance * 1000;
-  if (place.distance.endsWith(' m')) return numericDistance;
   return Number.POSITIVE_INFINITY;
 }
 
@@ -1474,7 +1564,7 @@ function restoreLocalItinerary(storage: ItineraryStorage, guest: boolean): { map
       x: ref.x ?? 45 + index * 4, y: ref.y ?? 45 + index * 3, rating: ref.rating ?? '—',
     }));
     return { maps, currentMap, places: dedupePlaces([...seeds, ...restored]).filter((place) =>
-      maps.includes(place.destination ?? 'Madri') && !removed.has(placeKey(place.placeId, place.destination ?? 'Madri'))) };
+      maps.includes(place.destination ?? 'Madri') && !removed.has(placeKey(place.placeId, place.destination ?? 'Madri'))).map((place) => ({ ...place, distance: '—' })) };
   } catch { return fallback; }
 }
 
@@ -1482,7 +1572,7 @@ async function saveCloudState(owner: string, maps: string[], currentMap: string,
   const response = await accountFetch(owner, '/api/sync', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ maps, currentMap, places: dedupePlaces(places), updatedAt: Date.now() }),
+    body: JSON.stringify({ maps, currentMap, places: dedupePlaces(places).map(withoutDistance), updatedAt: Date.now() }),
   });
   if (!response.ok) throw new Error('Não foi possível sincronizar seus roteiros');
 }
