@@ -51,7 +51,13 @@ function runtime() {
               else if (ownerMatches && (sql.includes('map_name NOT IN') ? !args.slice(2).includes(share.map_name) : true)) shares.delete(shareId);
             }
           }
-          else if (sql.includes('INSERT INTO user_itineraries')) { const allowed = !sql.includes('WHERE EXISTS') || accounts.get(args[3]) === args[4]; if (allowed) rows.set(args[0], args[1]); return { meta: { changes: allowed ? 1 : 0 } }; }
+          else if (sql.includes('INSERT INTO user_itineraries')) {
+            const accountAllowed = !sql.includes('WHERE EXISTS') || accounts.get(args[3]) === args[4];
+            const shareAllowed = !sql.includes('FROM map_shares s') || [...shares.values()].some((share) => share.share_id === args[5] && share.invited_email === args[6] && share.owner_generation === args[7] && accounts.get(share.owner_user_id) === share.owner_generation);
+            const allowed = accountAllowed && shareAllowed;
+            if (allowed) rows.set(args[0], args[1]);
+            return { meta: { changes: allowed ? 1 : 0 } };
+          }
           else if (sql.includes('DELETE FROM user_itineraries')) rows.delete(args[0]);
           else if (sql.includes('DELETE FROM user_accounts')) accounts.delete(args[0]);
           return { meta: { changes: 1 } };
@@ -90,6 +96,7 @@ function runtime() {
     });
     state.requests.push(request);
     if (url === '/api/sync') return load('app/api/sync/route.ts')[request.method](request);
+    if (url === '/api/shares/import') return load('app/api/shares/import/route.ts').POST(request);
     throw new Error(`Unexpected network call: ${url}`);
   };
   const auth = load('app/api/_lib/auth.ts');
@@ -258,6 +265,26 @@ test('map shares are email-bound, owner-scoped, revocable and exclude personal n
   assert.equal(payload.map.places[0].name, 'Colosseo');
   assert.equal(payload.map.places[0].note, undefined);
   assert.equal(payload.map.places[0].distance, undefined);
+
+  const inviteeChallenge = await challenge(r);
+  const inviteeOwner = accountHeader(inviteeCookie);
+  const importHeaders = { Cookie: `${inviteeCookie}; ${inviteeChallenge.cookie}`, 'X-Roamly-CSRF': inviteeChallenge.token, 'X-Roamly-Account': inviteeOwner };
+  const importRoute = r.load('app/api/shares/import/route.ts').POST;
+  const saved = await importRoute(req('/api/shares/import', importHeaders, JSON.stringify({ shareId })));
+  assert.equal(saved.status, 200);
+  assert.deepEqual(await saved.json(), { ok: true, mapName: 'Roma', addedCount: 1 });
+  const recipientData = JSON.parse(r.rows.get('B'));
+  assert.deepEqual(recipientData.maps, ['Roma']);
+  assert.equal(recipientData.currentMap, 'Roma');
+  assert.equal(recipientData.places[0].placeId, 'google-place-1');
+  assert.equal(recipientData.places[0].destination, 'Roma');
+  assert.equal(recipientData.places[0].note, '');
+  assert.equal(recipientData.places[0].distance, undefined);
+  const savedAgain = await importRoute(req('/api/shares/import', importHeaders, JSON.stringify({ shareId })));
+  assert.equal((await savedAgain.json()).addedCount, 0);
+  assert.equal(JSON.parse(r.rows.get('B')).places.length, 1);
+  const wrongEmail = await importRoute(req('/api/shares/import', { Cookie: `${guestCookie}; ${inviteeChallenge.cookie}`, 'X-Roamly-CSRF': inviteeChallenge.token, 'X-Roamly-Account': accountHeader(guestCookie) }, JSON.stringify({ shareId })));
+  assert.equal(wrongEmail.status, 404);
 
   const revoked = await shares.DELETE(req(`/api/shares?shareId=${shareId}`, headers, '{}', 'DELETE'));
   assert.equal(revoked.status, 200);

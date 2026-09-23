@@ -4,8 +4,8 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowUpRight, Clock3, Compass, MapPin, Moon, Sun } from 'lucide-react';
-import { authChallenge } from '../../account-storage';
+import { ArrowUpRight, BookmarkPlus, Clock3, Compass, MapPin, Moon, Sun } from 'lucide-react';
+import { accountFetch, authChallenge } from '../../account-storage';
 import { languageLocales, normalizeLanguage, type Language } from '../../i18n';
 import { createMarkerRegistry } from '../../map-markers';
 
@@ -38,9 +38,9 @@ function loadGoogleMapsForShare(apiKey: string, language: Language) {
 }
 
 const text = {
-  pt: { label: 'ROTEIRO COMPARTILHADO', loading: 'Verificando este convite…', signIn: 'Entre para ver o mapa', signInHelp: 'Use exatamente a Conta Google que recebeu o convite.', noInvitation: 'Este convite não está disponível para esta conta. Confirme o e-mail convidado ou peça um novo link.', error: 'Não foi possível carregar o mapa. Verifique a conexão e tente novamente.', places: 'lugares neste roteiro', noPlaces: 'Este mapa ainda não tem locais salvos.', address: 'Endereço não informado', hours: 'Horários não informados', viewPlace: 'Ver no Google Maps', private: 'Somente pessoas convidadas por e-mail podem ver este roteiro. Notas pessoais não são compartilhadas.', switchAccount: 'Sair para trocar de conta', brand: 'Seu roteiro, compartilhado com segurança', statusOpen: 'Aberto agora', statusSoon: 'Fecha em breve', statusClosed: 'Fechado ou horário indisponível', map: 'Mapa' },
-  es: { label: 'ITINERARIO COMPARTIDO', loading: 'Verificando esta invitación…', signIn: 'Inicia sesión para ver el mapa', signInHelp: 'Usa exactamente la Cuenta de Google que recibió la invitación.', noInvitation: 'Esta invitación no está disponible para esta cuenta. Comprueba el correo invitado o solicita un nuevo enlace.', error: 'No se pudo cargar el mapa. Comprueba tu conexión e inténtalo de nuevo.', places: 'lugares en este itinerario', noPlaces: 'Este mapa todavía no tiene lugares guardados.', address: 'Dirección no indicada', hours: 'Horario no indicado', viewPlace: 'Ver en Google Maps', private: 'Solo las personas invitadas por correo pueden ver este itinerario. No se comparten notas personales.', switchAccount: 'Cerrar sesión para cambiar de cuenta', brand: 'Tu itinerario, compartido de forma segura', statusOpen: 'Abierto ahora', statusSoon: 'Cierra pronto', statusClosed: 'Cerrado u horario no disponible', map: 'Mapa' },
-  en: { label: 'SHARED ITINERARY', loading: 'Checking this invitation…', signIn: 'Sign in to view this map', signInHelp: 'Use the exact Google Account that received the invitation.', noInvitation: 'This invitation is unavailable for this account. Check the invited email or request a new link.', error: 'Could not load the map. Check your connection and try again.', places: 'places in this itinerary', noPlaces: 'This map has no saved places yet.', address: 'Address not provided', hours: 'Hours not provided', viewPlace: 'View on Google Maps', private: 'Only people invited by email can view this itinerary. Personal notes are not shared.', switchAccount: 'Sign out to switch accounts', brand: 'Your itinerary, shared securely', statusOpen: 'Open now', statusSoon: 'Closing soon', statusClosed: 'Closed or hours unavailable', map: 'Map' },
+  pt: { label: 'ROTEIRO COMPARTILHADO', loading: 'Verificando este convite…', signIn: 'Entre para ver o mapa', signInHelp: 'Use exatamente a Conta Google que recebeu o convite.', noInvitation: 'Este convite não está disponível para esta conta. Confirme o e-mail convidado ou peça um novo link.', error: 'Não foi possível carregar o mapa. Verifique a conexão e tente novamente.', places: 'lugares neste roteiro', noPlaces: 'Este mapa ainda não tem locais salvos.', address: 'Endereço não informado', hours: 'Horários não informados', viewPlace: 'Ver no Google Maps', private: 'Somente pessoas convidadas por e-mail podem ver este roteiro. Notas pessoais não são compartilhadas.', switchAccount: 'Sair para trocar de conta', brand: 'Seu roteiro, compartilhado com segurança', statusOpen: 'Aberto agora', statusSoon: 'Fecha em breve', statusClosed: 'Fechado ou horário indisponível', map: 'Mapa', save: 'Salvar em Meus roteiros', saving: 'Salvando roteiro…', saveError: 'Não foi possível salvar. Tente novamente.' },
+  es: { label: 'ITINERARIO COMPARTIDO', loading: 'Verificando esta invitación…', signIn: 'Inicia sesión para ver el mapa', signInHelp: 'Usa exactamente la Cuenta de Google que recibió la invitación.', noInvitation: 'Esta invitación no está disponible para esta cuenta. Comprueba el correo invitado o solicita un nuevo enlace.', error: 'No se pudo cargar el mapa. Comprueba tu conexión e inténtalo de nuevo.', places: 'lugares en este itinerario', noPlaces: 'Este mapa todavía no tiene lugares guardados.', address: 'Dirección no indicada', hours: 'Horario no indicado', viewPlace: 'Ver en Google Maps', private: 'Solo las personas invitadas por correo pueden ver este itinerario. No se comparten notas personales.', switchAccount: 'Cerrar sesión para cambiar de cuenta', brand: 'Tu itinerario, compartido de forma segura', statusOpen: 'Abierto ahora', statusSoon: 'Cierra pronto', statusClosed: 'Cerrado u horario no disponible', map: 'Mapa', save: 'Guardar en Mis itinerarios', saving: 'Guardando itinerario…', saveError: 'No se pudo guardar. Inténtalo de nuevo.' },
+  en: { label: 'SHARED ITINERARY', loading: 'Checking this invitation…', signIn: 'Sign in to view this map', signInHelp: 'Use the exact Google Account that received the invitation.', noInvitation: 'This invitation is unavailable for this account. Check the invited email or request a new link.', error: 'Could not load the map. Check your connection and try again.', places: 'places in this itinerary', noPlaces: 'This map has no saved places yet.', address: 'Address not provided', hours: 'Hours not provided', viewPlace: 'View on Google Maps', private: 'Only people invited by email can view this itinerary. Personal notes are not shared.', switchAccount: 'Sign out to switch accounts', brand: 'Your itinerary, shared securely', statusOpen: 'Open now', statusSoon: 'Closing soon', statusClosed: 'Closed or hours unavailable', map: 'Map', save: 'Save to My itineraries', saving: 'Saving itinerary…', saveError: 'Could not save. Please try again.' },
 };
 
 async function loadGoogleIdentity(): Promise<IdentityApi> {
@@ -72,6 +72,8 @@ export function SharedMapView({ shareId }: { shareId: string }) {
   const [mapError, setMapError] = useState(false);
   const [selectedPlaceId, setSelectedPlaceId] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const googleButton = useRef<HTMLDivElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);
   const googleMapRef = useRef<google.maps.Map | null>(null);
@@ -194,6 +196,26 @@ export function SharedMapView({ shareId }: { shareId: string }) {
     finally { setLoginBusy(false); }
   }
 
+  async function saveToMyItineraries() {
+    if (!user || saveBusy) return;
+    setSaveBusy(true); setSaveError('');
+    try {
+      const csrf = await authChallenge();
+      const identity = `${user.id}:${user.generation}`;
+      const response = await accountFetch(identity, '/api/shares/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Roamly-CSRF': csrf },
+        body: JSON.stringify({ shareId }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error || copy.saveError);
+      window.location.assign('/');
+    } catch (cause) {
+      setSaveError(cause instanceof Error ? cause.message : copy.saveError);
+      setSaveBusy(false);
+    }
+  }
+
   function placeMapUrl(place: SharedPlace) {
     const params = new URLSearchParams({ api: '1', query: place.name + (place.address ? `, ${place.address}` : '') });
     if (place.placeId) params.set('query_place_id', place.placeId);
@@ -212,7 +234,7 @@ export function SharedMapView({ shareId }: { shareId: string }) {
         {!clientId && <p className="auth-error">Google sign-in is unavailable right now.</p>}
         {loginBusy && <p className="share-muted">{copy.loading}</p>}{loginError && <p role="alert" className="auth-error">{loginError}</p>}
       </section> : error === 'login' ? <div className="share-state"><p>{copy.error}</p><button onClick={() => void loadSharedMap()}>↻</button></div> : error === 'not-available' ? <section className="share-signin-card"><span className="share-hero-icon"><MapPin size={28} /></span><h1>{copy.signIn}</h1><p>{copy.noInvitation}</p><strong className="share-user-email">{user.email}</strong><button className="share-switch-account" disabled={loginBusy} onClick={() => void switchAccount()}>{copy.switchAccount}</button>{loginError && <p role="alert" className="auth-error">{loginError}</p>}</section> : error === 'failed' ? <div className="share-state"><p>{copy.error}</p><button onClick={() => void loadSharedMap()}>{language === 'pt' ? 'Tentar novamente' : language === 'es' ? 'Reintentar' : 'Try again'}</button></div> : !map ? <div className="share-state"><span className="search-spinner" /><p>{copy.loading}</p></div> : <>
-        <div className="shared-map-title"><span className="share-eyebrow">{copy.label}</span><h1>{map.name}</h1><p>{map.places.length} {copy.places}</p></div>
+        <div className="shared-map-title"><span className="share-eyebrow">{copy.label}</span><h1>{map.name}</h1><p>{map.places.length} {copy.places}</p><button className="save-shared-map" onClick={() => void saveToMyItineraries()} disabled={saveBusy}><BookmarkPlus size={18} />{saveBusy ? copy.saving : copy.save}</button>{saveError && <p className="share-save-error" role="alert">{saveError}</p>}</div>
         <p className="shared-privacy-note">{copy.private}</p>
         {map.places.length === 0 ? <div className="share-empty-map"><MapPin size={24} /><p>{copy.noPlaces}</p></div> : <div className="shared-place-list">{map.places.map((place, index) => <article className={`shared-place-card ${selectedPlaceId === place.id ? 'selected' : ''}`} key={place.id} onClick={() => { setSelectedPlaceId(place.id); if (place.lat != null && place.lng != null) { googleMapRef.current?.panTo({ lat: place.lat, lng: place.lng }); googleMapRef.current?.setZoom(15); } }}>
           <div className="shared-place-photo">{place.photo ? <img src={place.photo} alt={place.name} /> : <MapPin size={24} />}<span>{String(index + 1).padStart(2, '0')}</span></div>
