@@ -43,7 +43,7 @@ export async function PUT(request: Request) {
   if (mismatch) return mismatch;
   try {
     const data = await request.json() as CloudItinerary;
-    if (!Array.isArray(data.maps) || !Array.isArray(data.places) || typeof data.currentMap !== 'string') {
+    if (!Array.isArray(data.maps) || data.maps.length > 100 || data.maps.some((map) => typeof map !== 'string' || map.trim().length > 120) || !Array.isArray(data.places) || typeof data.currentMap !== 'string') {
       return Response.json({ error: 'Dados do roteiro inválidos' }, { status: 400 });
     }
     const payload = JSON.stringify({ maps: data.maps, currentMap: data.currentMap, places: data.places.map(withoutDistance), updatedAt: Date.now() });
@@ -51,11 +51,15 @@ export async function PUT(request: Request) {
 
     const db = database();
     const updatedAt = Date.now();
-    const saved = await db.prepare(`
+    const saveStatement = db.prepare(`
       INSERT INTO user_itineraries (user_id, data_json, updated_at)
       SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM user_accounts WHERE user_id = ? AND generation = ?)
       ON CONFLICT(user_id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at
-    `).bind(user.id, payload, updatedAt, user.id, user.generation).run();
+    `).bind(user.id, payload, updatedAt, user.id, user.generation);
+    const revokeRemovedMaps = data.maps.length
+      ? db.prepare(`DELETE FROM map_shares WHERE owner_user_id = ? AND owner_generation = ? AND map_name NOT IN (${data.maps.map(() => '?').join(',')})`).bind(user.id, user.generation, ...data.maps)
+      : db.prepare('DELETE FROM map_shares WHERE owner_user_id = ? AND owner_generation = ?').bind(user.id, user.generation);
+    const [saved] = await db.batch([saveStatement, revokeRemovedMaps]);
     if (!saved.meta.changes) return unauthorized();
     return Response.json({ ok: true, updatedAt }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
@@ -75,6 +79,7 @@ export async function DELETE(request: Request) {
     // Atomic deletion plus generation-guarded writes prevent an in-flight save
     // or another device from restoring a deleted account's data.
     await db.batch([
+      db.prepare('DELETE FROM map_shares WHERE owner_user_id = ? AND owner_generation = ?').bind(user.id, user.generation),
       db.prepare('DELETE FROM user_itineraries WHERE user_id = ? AND EXISTS (SELECT 1 FROM user_accounts WHERE user_id = ? AND generation = ?)').bind(user.id, user.id, user.generation),
       db.prepare('DELETE FROM user_accounts WHERE user_id = ? AND generation = ?').bind(user.id, user.generation),
     ]);

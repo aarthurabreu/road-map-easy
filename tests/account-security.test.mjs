@@ -22,6 +22,7 @@ function memoryStorage() {
 function runtime() {
   const rows = new Map();
   const accounts = new Map();
+  const shares = new Map();
   const state = { dbCalls: 0, googleCalls: 0, cookie: '', requests: [] };
   const db = {
     prepare(sql) {
@@ -29,10 +30,27 @@ function runtime() {
       return { bind(...args) { return {
         async first() {
           if (sql.includes('SELECT generation')) return accounts.has(args[0]) ? { generation: accounts.get(args[0]) } : null;
+          if (sql.includes('COUNT(*) AS total FROM map_shares')) return { total: [...shares.values()].filter((share) => share.owner_user_id === args[0] && share.owner_generation === args[1] && share.map_name === args[2]).length };
+          if (sql.includes('FROM map_shares')) {
+            if (sql.includes('invited_email = ?')) return [...shares.values()].find((share) => share.owner_user_id === args[0] && share.owner_generation === args[1] && share.map_name === args[2] && share.invited_email === args[3]) ?? null;
+            return shares.get(args[0]) ?? null;
+          }
           return rows.has(args[0]) ? { data_json: rows.get(args[0]), updated_at: 1 } : null;
+        },
+        async all() {
+          if (sql.includes('FROM map_shares')) return { results: [...shares.values()].filter((share) => share.owner_user_id === args[0] && share.owner_generation === args[1] && (!sql.includes('map_name = ?') || share.map_name === args[2])) };
+          return { results: [] };
         },
         async run() {
           if (sql.includes('INSERT OR IGNORE INTO user_accounts')) { if (!accounts.has(args[0])) accounts.set(args[0], args[1]); }
+          else if (sql.includes('INSERT INTO map_shares')) { if (!sql.includes('WHERE EXISTS') || accounts.get(args[6]) === args[7]) shares.set(args[0], { share_id: args[0], owner_user_id: args[1], owner_generation: args[2], map_name: args[3], invited_email: args[4], created_at: args[5] }); }
+          else if (sql.includes('DELETE FROM map_shares')) {
+            for (const [shareId, share] of shares) {
+              const ownerMatches = share.owner_user_id === args[0] && share.owner_generation === args[1];
+              if (sql.includes('share_id = ?')) { if (shareId === args[0] && share.owner_user_id === args[1] && share.owner_generation === args[2]) shares.delete(shareId); }
+              else if (ownerMatches && (sql.includes('map_name NOT IN') ? !args.slice(2).includes(share.map_name) : true)) shares.delete(shareId);
+            }
+          }
           else if (sql.includes('INSERT INTO user_itineraries')) { const allowed = !sql.includes('WHERE EXISTS') || accounts.get(args[3]) === args[4]; if (allowed) rows.set(args[0], args[1]); return { meta: { changes: allowed ? 1 : 0 } }; }
           else if (sql.includes('DELETE FROM user_itineraries')) rows.delete(args[0]);
           else if (sql.includes('DELETE FROM user_accounts')) accounts.delete(args[0]);
@@ -77,7 +95,7 @@ function runtime() {
   const auth = load('app/api/_lib/auth.ts');
   const security = load('app/account-storage.ts');
   Object.assign(context, security);
-  return { context, state, rows, accounts, db, auth, security, load };
+  return { context, state, rows, accounts, shares, db, auth, security, load };
 }
 
 const user = (id) => ({ id, generation: `gen-${id}`, email: `${id.toLowerCase()}@example.invalid`, name: id });
@@ -165,13 +183,15 @@ test('GET and PUT reject stale/missing owner before DB access; valid same-accoun
   }
   assert.ok(r.state.dbCalls > 0); // generation lookup occurs before validating account header
   assert.equal(r.rows.get('B'), original);
-  const valid = req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': owner }, '{"maps":["B new"],"currentMap":"B new","places":[],"user_id":"A"}', 'PUT');
+  const valid = req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': owner }, '{"maps":["B new"],"currentMap":"B new","places":[{"placeId":"p","distance":"3 km"}],"user_id":"A"}', 'PUT');
   assert.equal((await sync.PUT(valid)).status, 200);
   assert.equal(r.rows.has('A'), false);
+  assert.equal(JSON.parse(r.rows.get('B')).places[0].distance, undefined);
   const read = await sync.GET(req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': owner }, '', 'GET'));
   const body = await read.json();
   assert.equal(body.userId, owner);
   assert.deepEqual(body.data.maps, ['B new']);
+  assert.equal(body.data.places[0].distance, undefined);
   assert.equal((await sync.PUT(req('/api/sync', { 'X-Roamly-Account': owner }, '{}', 'PUT'))).status, 401);
   assert.equal((await sync.PUT(req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': owner, Origin: 'https://evil.invalid' }, '{}', 'PUT'))).status, 403);
 });
@@ -203,6 +223,52 @@ test('account deletion requires CSRF and exact account generation, deletes itine
   assert.equal(r.accounts.has('B'), false);
   assert.equal(await r.auth.getSessionUser(req('/', { Cookie: session }, '', 'GET')), null);
   assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith('roamly_session=;') && cookie.includes('Max-Age=0')));
+});
+
+test('map shares are email-bound, owner-scoped, revocable and exclude personal notes and live distance', async () => {
+  const r = runtime();
+  const ownerCookie = cookiePair(await r.auth.createSessionCookie(user('A'), req('/')));
+  const owner = accountHeader(ownerCookie);
+  r.rows.set('A', JSON.stringify({ maps: ['Roma'], currentMap: 'Roma', places: [
+    { id: 'p1', placeId: 'google-place-1', destination: 'Roma', name: 'Colosseo', address: 'Piazza del Colosseo', note: 'Surpresa especial', distance: '12 m', photo: 'https://images.invalid/colosseo.jpg' },
+    { id: 'p2', placeId: 'google-place-2', destination: 'Madri', name: 'Prado', note: 'Private note' },
+  ] }));
+  const c = await challenge(r);
+  const headers = { Cookie: `${ownerCookie}; ${c.cookie}`, 'X-Roamly-CSRF': c.token, 'X-Roamly-Account': owner };
+  const shares = r.load('app/api/shares/route.ts');
+  assert.equal((await shares.POST(req('/api/shares', { Cookie: ownerCookie, 'X-Roamly-Account': owner }, JSON.stringify({ mapName: 'Roma', email: 'friend@example.invalid' })))).status, 403);
+  const created = await shares.POST(req('/api/shares', headers, JSON.stringify({ mapName: 'Roma', email: ' Friend@Example.Invalid ' })));
+  assert.equal(created.status, 201);
+  const { shareId } = await created.json();
+  assert.ok(shareId);
+  const duplicate = await shares.POST(req('/api/shares', headers, JSON.stringify({ mapName: 'Roma', email: 'friend@example.invalid' })));
+  assert.equal((await duplicate.json()).shareId, shareId);
+  const inviteList = await shares.GET(req('/api/shares', { Cookie: ownerCookie, 'X-Roamly-Account': owner }, '', 'GET'));
+  assert.equal((await inviteList.json()).shares[0].invited_email, 'friend@example.invalid');
+
+  const guestCookie = cookiePair(await r.auth.createSessionCookie(user('C'), req('/')));
+  const rejected = await shares.GET(req(`/api/shares?shareId=${shareId}`, { Cookie: guestCookie }, '', 'GET'));
+  assert.equal(rejected.status, 404);
+  const inviteeCookie = cookiePair(await r.auth.createSessionCookie({ ...user('B'), email: 'friend@example.invalid' }, req('/')));
+  const visible = await shares.GET(req(`/api/shares?shareId=${shareId}`, { Cookie: inviteeCookie }, '', 'GET'));
+  assert.equal(visible.status, 200);
+  const payload = await visible.json();
+  assert.equal(payload.map.name, 'Roma');
+  assert.equal(payload.map.places.length, 1);
+  assert.equal(payload.map.places[0].name, 'Colosseo');
+  assert.equal(payload.map.places[0].note, undefined);
+  assert.equal(payload.map.places[0].distance, undefined);
+
+  const revoked = await shares.DELETE(req(`/api/shares?shareId=${shareId}`, headers, '{}', 'DELETE'));
+  assert.equal(revoked.status, 200);
+  assert.equal((await shares.GET(req(`/api/shares?shareId=${shareId}`, { Cookie: inviteeCookie }, '', 'GET'))).status, 404);
+
+  const restored = await shares.POST(req('/api/shares', headers, JSON.stringify({ mapName: 'Roma', email: 'friend@example.invalid' })));
+  const secondShareId = (await restored.json()).shareId;
+  const deletedAccount = await r.load('app/api/sync/route.ts').DELETE(req('/api/sync', headers, '{}', 'DELETE'));
+  assert.equal(deletedAccount.status, 200);
+  assert.equal(r.shares.size, 0);
+  assert.equal((await shares.GET(req(`/api/shares?shareId=${secondShareId}`, { Cookie: inviteeCookie }, '', 'GET'))).status, 404);
 });
 
 test('all five cache copies are owner-scoped; legacy data stays guest-only and account IDs cannot alias guest', () => {

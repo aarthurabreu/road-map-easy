@@ -12,3 +12,14 @@ export const createUserAccountsTable = `
     generation TEXT NOT NULL
   )
 `;
+
+export const createMapSharesTable = `
+  CREATE TABLE IF NOT EXISTS map_shares (
+    share_id TEXT PRIMARY KEY NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    owner_generation TEXT NOT NULL,
+    map_name TEXT NOT NULL,
+    invited_email TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )
+`;

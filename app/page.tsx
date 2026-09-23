@@ -7,7 +7,7 @@
 
 import {
   Bike, BusFront, Car, Check, ChevronDown, Clock3, Compass, Footprints, LocateFixed,
-  Map as MapIcon, MapPin, Menu, Navigation, Plus, Search, SlidersHorizontal,
+  Map as MapIcon, MapPin, Menu, Navigation, Plus, Search, Share2, SlidersHorizontal,
   Cloud, LogOut, Moon, Sun, ShieldCheck, Sparkles, Star, Trash2, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -17,6 +17,7 @@ import { accountStorage, accountFetch, AccountChangedError, authChallenge, accou
 import { accountIdentity, clearItineraryCache, clearOtherAccountGenerations, withoutDistance } from './data-privacy';
 import { PrivacyDialog, LocationDialog } from './privacy-dialog';
 import { privacyCopy } from './privacy-copy';
+import { MapShareDialog } from './map-share-dialog';
 
 type Theme = 'light' | 'dark';
 
@@ -111,7 +112,7 @@ export default function Home() {
   const [theme, setTheme] = useState<Theme>('light');
   const [themeReady, setThemeReady] = useState(false);
   const [language, setLanguage] = useState<Language>('pt');
-  const t = translations[language];
+  const t: Copy = translations[language];
   const locale = languageLocales[language];
   const [places, setPlaces] = useState(initialPlaces);
   const [selectedId, setSelectedId] = useState('prado');
@@ -124,6 +125,7 @@ export default function Home() {
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
   const [mapPendingDelete, setMapPendingDelete] = useState<string | null>(null);
   const [mapsOpen, setMapsOpen] = useState(false);
+  const [shareMapName, setShareMapName] = useState<string | null>(null);
   const [newMapName, setNewMapName] = useState('');
   const [maps, setMaps] = useState(['Madri']);
   const [currentMap, setCurrentMap] = useState('Madri');
@@ -771,12 +773,17 @@ export default function Home() {
   async function exportMyData() {
     const identity = authUser ? accountIdentity(authUser) : null;
     let cloudCopy: unknown = null;
+    let sharedInvites: unknown[] = [];
     if (identity) {
       const response = await accountFetch(identity, '/api/sync');
       if (!response.ok) throw new Error('Export failed');
       const payload = await response.json() as { userId?: string; data?: { maps: string[]; currentMap: string; places: Place[] } | null };
       if (payload.userId !== identity) throw new AccountChangedError('The account changed');
       cloudCopy = payload.data ? { ...payload.data, places: payload.data.places.map(withoutDistance) } : null;
+      const inviteResponse = await accountFetch(identity, '/api/shares');
+      if (!inviteResponse.ok) throw new Error('Could not export invitations');
+      const invites = await inviteResponse.json() as { shares?: unknown[] };
+      sharedInvites = invites.shares ?? [];
     }
     const content = {
       app: 'Easy Road Map', version: 1, exportedAt: new Date().toISOString(),
@@ -784,6 +791,7 @@ export default function Home() {
       preferences: { theme, language },
       localItinerary: { maps, currentMap, places: places.map(withoutDistance) },
       ...(identity ? { cloudItinerary: cloudCopy } : {}),
+      ...(identity ? { sharedMapInvitations: sharedInvites } : {}),
     };
     const blob = new Blob([JSON.stringify(content, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1049,12 +1057,19 @@ export default function Home() {
                   {currentMap === mapName && <Check size={19} />}
                 </button>
                 <button className="delete-map-button" onClick={() => setMapPendingDelete(mapName)} aria-label={`${t.deleteMap} ${mapName}`} title={`${t.deleteMap} ${mapName}`}><Trash2 size={17} /></button>
+                <button className="share-map-button" onClick={() => {
+                  setMapsOpen(false);
+                  if (!authUser) { setAuthOpen(true); setToast(language === 'es' ? 'Inicia sesión para invitar a alguien' : language === 'en' ? 'Sign in to invite someone' : 'Entre na sua conta para convidar alguém'); return; }
+                  if (syncStatus !== 'synced') { setToast(t.syncingItineraries); return; }
+                  setShareMapName(mapName);
+                }} aria-label={`${t.shareMap} ${mapName}`} title={t.shareMap}><Share2 size={17} /></button>
               </div>
             ))}
             <div className="new-map-form"><label htmlFor="new-map">{t.newDestination}</label><div><input id="new-map" value={newMapName} onChange={(event) => setNewMapName(event.target.value)} placeholder={t.destinationExample} onKeyDown={(event) => event.key === 'Enter' && createMap()} /><button onClick={createMap}><Plus size={18} /> {t.createMap}</button></div></div>
           </section>
         </div>
       )}
+      {shareMapName && authUser && <MapShareDialog mapName={shareMapName} language={language} email={authUser.email} identity={accountIdentity(authUser)} onClose={() => setShareMapName(null)} />}
       {mapPlaceCandidate && (
         <div className="modal-backdrop map-place-backdrop" onClick={() => setMapPlaceCandidate(null)}>
           <section className="maps-modal map-place-modal" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="map-place-title">
@@ -1129,7 +1144,7 @@ function GooglePlacePhoto({ placeId, name, className = '' }: { placeId: string; 
 
 function PlaceRow({ place, active, mapsReady, language, onSelect }: { place: Place; active: boolean; mapsReady: boolean; language: Language; onSelect: () => void }) {
   const [photoFailed, setPhotoFailed] = useState(false);
-  const t = translations[language];
+  const t: Copy = translations[language];
 
   useEffect(() => setPhotoFailed(false), [place.photo, place.placeId]);
 
@@ -1204,7 +1219,7 @@ function LiveGoogleMap({
   language: Language;
   theme: Theme;
 }) {
-  const t = translations[language];
+  const t: Copy = translations[language];
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const markersRef = useRef<ReturnType<typeof createMarkerRegistry> | null>(null);
@@ -1293,7 +1308,7 @@ function LiveGoogleMap({
 
 function MapsConnection({ status, error, onConnect, language }: { status: MapsStatus; error: string; onConnect: (key: string) => void; language: Language }) {
   const [key, setKey] = useState('');
-  const t = translations[language];
+  const t: Copy = translations[language];
   if (status === 'loading') return <div className="maps-connect-card compact"><span className="search-spinner" /><strong>{t.mapsLoading}</strong></div>;
   return (
     <div className="maps-connect-card">
