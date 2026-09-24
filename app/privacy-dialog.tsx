@@ -36,7 +36,7 @@ export function PrivacyDialog({ language, email, locationEnabled, onLocation, on
         </section>
         <section className="privacy-location"><h3><LocateFixed size={18} />{locationEnabled ? p.locationOn : p.locationOff}</h3><p>{p.locationHelp}</p><button disabled={!!busy} onClick={onLocation}>{locationEnabled ? p.disable : p.enable}</button><p>{p.locationHint}</p></section>
         {p.sections.map(([title, body]) => <section key={title}><h3>{title}</h3><p>{body}</p></section>)}
-        <section><h3><ShieldCheck size={18} />{p.contact}</h3><a href={`mailto:${privacyContact}`}>{privacyContact}</a><div className="privacy-links"><a href="https://policies.google.com/privacy" target="_blank" rel="noreferrer">{p.googlePolicy}</a><a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noreferrer">{p.cloudflarePolicy}</a></div></section>
+        <section><h3><ShieldCheck size={18} />{p.contact}</h3><a href={`mailto:${privacyContact}`}>{privacyContact}</a><div className="privacy-links"><a href="https://policies.google.com/privacy" target="_blank" rel="noreferrer">{p.googlePolicy}</a><a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noreferrer">{p.cloudflarePolicy}</a><a href="https://resend.com/legal/privacy-policy" target="_blank" rel="noreferrer">{p.resendPolicy}</a></div></section>
       </>}
       {error && <p role="alert" className="auth-error">{error}</p>}
     </div>

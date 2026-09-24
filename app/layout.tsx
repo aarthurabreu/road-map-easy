@@ -13,6 +13,9 @@ export const metadata: Metadata = {
   metadataBase: new URL('https://roamly-trip-guide-arthur.arthurmaquizito.chatgpt.site'),
   title: 'Easy Road Map — Seu guia de viagem',
   description: 'Organize lugares, veja o que está aberto e explore cada destino com um mapa feito para a sua viagem.',
+  manifest: '/manifest.webmanifest',
+  icons: { icon: '/easy-road-map-icon.svg', apple: '/apple-touch-icon.png' },
+  appleWebApp: { capable: true, statusBarStyle: 'default', title: 'Easy Road Map' },
   openGraph: { title: 'Easy Road Map — Seu guia de viagem', description: 'Todos os lugares da sua viagem em um mapa simples e inteligente.', type: 'website', images: [{ url: '/og.png', width: 1200, height: 630, alt: 'Easy Road Map — Sua viagem, toda no mapa.' }] },
   twitter: { card: 'summary_large_image', title: 'Easy Road Map — Seu guia de viagem', description: 'Todos os lugares da sua viagem em um mapa simples e inteligente.', images: ['/og.png'] },
 };

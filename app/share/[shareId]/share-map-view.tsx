@@ -13,6 +13,7 @@ type AuthUser = { id: string; email: string; name: string; generation: string };
 type SharedPlace = { id: string; placeId: string; name: string; category?: string; address?: string; hours?: string; status?: string; statusLabel?: string; photo?: string; rating?: string; lat?: number; lng?: number; googleMapsURI?: string; pinColor?: string };
 type SharedMap = { name: string; places: SharedPlace[] };
 type IdentityApi = { initialize: (options: { client_id: string; callback: (response: { credential?: string }) => void; auto_select?: boolean }) => void; renderButton: (parent: HTMLElement, options: Record<string, string | number>) => void };
+type InstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }> };
 
 function loadGoogleMapsForShare(apiKey: string, language: Language) {
   const runtimeWindow = window as Window & { google?: typeof google; __shareMapsReady?: () => void };
@@ -38,9 +39,9 @@ function loadGoogleMapsForShare(apiKey: string, language: Language) {
 }
 
 const text = {
-  pt: { label: 'ROTEIRO COMPARTILHADO', loading: 'Verificando este convite…', signIn: 'Entre para ver o mapa', signInHelp: 'Use exatamente a Conta Google que recebeu o convite.', noInvitation: 'Este convite não está disponível para esta conta. Confirme o e-mail convidado ou peça um novo link.', error: 'Não foi possível carregar o mapa. Verifique a conexão e tente novamente.', places: 'lugares neste roteiro', noPlaces: 'Este mapa ainda não tem locais salvos.', address: 'Endereço não informado', hours: 'Horários não informados', viewPlace: 'Ver no Google Maps', private: 'Somente pessoas convidadas por e-mail podem ver este roteiro. Notas pessoais não são compartilhadas.', switchAccount: 'Sair para trocar de conta', brand: 'Seu roteiro, compartilhado com segurança', statusOpen: 'Aberto agora', statusSoon: 'Fecha em breve', statusClosed: 'Fechado ou horário indisponível', map: 'Mapa', save: 'Salvar em Meus roteiros', saving: 'Salvando roteiro…', saveError: 'Não foi possível salvar. Tente novamente.' },
-  es: { label: 'ITINERARIO COMPARTIDO', loading: 'Verificando esta invitación…', signIn: 'Inicia sesión para ver el mapa', signInHelp: 'Usa exactamente la Cuenta de Google que recibió la invitación.', noInvitation: 'Esta invitación no está disponible para esta cuenta. Comprueba el correo invitado o solicita un nuevo enlace.', error: 'No se pudo cargar el mapa. Comprueba tu conexión e inténtalo de nuevo.', places: 'lugares en este itinerario', noPlaces: 'Este mapa todavía no tiene lugares guardados.', address: 'Dirección no indicada', hours: 'Horario no indicado', viewPlace: 'Ver en Google Maps', private: 'Solo las personas invitadas por correo pueden ver este itinerario. No se comparten notas personales.', switchAccount: 'Cerrar sesión para cambiar de cuenta', brand: 'Tu itinerario, compartido de forma segura', statusOpen: 'Abierto ahora', statusSoon: 'Cierra pronto', statusClosed: 'Cerrado u horario no disponible', map: 'Mapa', save: 'Guardar en Mis itinerarios', saving: 'Guardando itinerario…', saveError: 'No se pudo guardar. Inténtalo de nuevo.' },
-  en: { label: 'SHARED ITINERARY', loading: 'Checking this invitation…', signIn: 'Sign in to view this map', signInHelp: 'Use the exact Google Account that received the invitation.', noInvitation: 'This invitation is unavailable for this account. Check the invited email or request a new link.', error: 'Could not load the map. Check your connection and try again.', places: 'places in this itinerary', noPlaces: 'This map has no saved places yet.', address: 'Address not provided', hours: 'Hours not provided', viewPlace: 'View on Google Maps', private: 'Only people invited by email can view this itinerary. Personal notes are not shared.', switchAccount: 'Sign out to switch accounts', brand: 'Your itinerary, shared securely', statusOpen: 'Open now', statusSoon: 'Closing soon', statusClosed: 'Closed or hours unavailable', map: 'Map', save: 'Save to My itineraries', saving: 'Saving itinerary…', saveError: 'Could not save. Please try again.' },
+  pt: { label: 'ROTEIRO COMPARTILHADO', loading: 'Verificando este convite…', signIn: 'Entre para ver o mapa', signInHelp: 'Use exatamente a Conta Google que recebeu o convite.', noInvitation: 'Este convite não está disponível para esta conta. Confirme o e-mail convidado ou peça um novo link.', error: 'Não foi possível carregar o mapa. Verifique a conexão e tente novamente.', places: 'lugares neste roteiro', noPlaces: 'Este mapa ainda não tem locais salvos.', address: 'Endereço não informado', hours: 'Horários não informados', viewPlace: 'Ver no Google Maps', private: 'Somente pessoas convidadas por e-mail podem ver este roteiro. Notas pessoais não são compartilhadas.', switchAccount: 'Sair para trocar de conta', brand: 'Seu roteiro, compartilhado com segurança', statusOpen: 'Aberto agora', statusSoon: 'Fecha em breve', statusClosed: 'Fechado ou horário indisponível', map: 'Mapa', save: 'Salvar em Meus roteiros', saving: 'Salvando roteiro…', saveError: 'Não foi possível salvar. Tente novamente.', installTitle: 'Abra este convite como app', installIos: 'No Safari, toque em Compartilhar e escolha “Adicionar à Tela de Início”. Depois, abra o Easy Road Map pelo ícone.', installAndroid: 'No Chrome, escolha “Instalar app” no menu para abrir convites dentro do Easy Road Map.', install: 'Instalar app' },
+  es: { label: 'ITINERARIO COMPARTIDO', loading: 'Verificando esta invitación…', signIn: 'Inicia sesión para ver el mapa', signInHelp: 'Usa exactamente la Cuenta de Google que recibió la invitación.', noInvitation: 'Esta invitación no está disponible para esta cuenta. Comprueba el correo invitado o solicita un nuevo enlace.', error: 'No se pudo cargar el mapa. Comprueba tu conexión e inténtalo de nuevo.', places: 'lugares en este itinerario', noPlaces: 'Este mapa todavía no tiene lugares guardados.', address: 'Dirección no indicada', hours: 'Horario no indicado', viewPlace: 'Ver en Google Maps', private: 'Solo las personas invitadas por correo pueden ver este itinerario. No se comparten notas personales.', switchAccount: 'Cerrar sesión para cambiar de cuenta', brand: 'Tu itinerario, compartido de forma segura', statusOpen: 'Abierto ahora', statusSoon: 'Cierra pronto', statusClosed: 'Cerrado u horario no disponible', map: 'Mapa', save: 'Guardar en Mis itinerarios', saving: 'Guardando itinerario…', saveError: 'No se pudo guardar. Inténtalo de nuevo.', installTitle: 'Abre esta invitación como app', installIos: 'En Safari, toca Compartir y elige “Añadir a pantalla de inicio”. Después, abre Easy Road Map desde su icono.', installAndroid: 'En Chrome, elige “Instalar app” en el menú para abrir invitaciones dentro de Easy Road Map.', install: 'Instalar app' },
+  en: { label: 'SHARED ITINERARY', loading: 'Checking this invitation…', signIn: 'Sign in to view this map', signInHelp: 'Use the exact Google Account that received the invitation.', noInvitation: 'This invitation is unavailable for this account. Check the invited email or request a new link.', error: 'Could not load the map. Check your connection and try again.', places: 'places in this itinerary', noPlaces: 'This map has no saved places yet.', address: 'Address not provided', hours: 'Hours not provided', viewPlace: 'View on Google Maps', private: 'Only people invited by email can view this itinerary. Personal notes are not shared.', switchAccount: 'Sign out to switch accounts', brand: 'Your itinerary, shared securely', statusOpen: 'Open now', statusSoon: 'Closing soon', statusClosed: 'Closed or hours unavailable', map: 'Map', save: 'Save to My itineraries', saving: 'Saving itinerary…', saveError: 'Could not save. Please try again.', installTitle: 'Open this invite like an app', installIos: 'In Safari, tap Share and choose “Add to Home Screen”. Then open Easy Road Map from its icon.', installAndroid: 'In Chrome, choose “Install app” from the menu to open invites inside Easy Road Map.', install: 'Install app' },
 };
 
 async function loadGoogleIdentity(): Promise<IdentityApi> {
@@ -74,6 +75,9 @@ export function SharedMapView({ shareId }: { shareId: string }) {
   const [loginBusy, setLoginBusy] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const [showInstallHelp, setShowInstallHelp] = useState(false);
+  const [isIos, setIsIos] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const googleButton = useRef<HTMLDivElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);
   const googleMapRef = useRef<google.maps.Map | null>(null);
@@ -93,6 +97,20 @@ export function SharedMapView({ shareId }: { shareId: string }) {
       fetch('/api/auth/session', { cache: 'no-store' }).then((response) => response.json() as Promise<{ user?: AuthUser | null }>).catch(() => ({ user: null })),
       fetch('/api/google-config', { cache: 'no-store' }).then((response) => response.json() as Promise<{ apiKey?: string }>).catch((): { apiKey?: string } => ({})),
     ]).then(([config, session, mapsConfig]) => { setClientId(config.clientId ?? ''); setUser(session.user ?? null); setMapsKey(mapsConfig.apiKey ?? ''); setLoading(false); });
+  }, []);
+
+  useEffect(() => {
+    const standalone = window.matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+    if (!standalone) {
+      setShowInstallHelp(true);
+      setIsIos(/iphone|ipad|ipod/i.test(navigator.userAgent));
+    }
+    const captureInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as InstallPromptEvent);
+    };
+    window.addEventListener('beforeinstallprompt', captureInstallPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', captureInstallPrompt);
   }, []);
 
   const loadSharedMap = useCallback(async () => {
@@ -216,6 +234,13 @@ export function SharedMapView({ shareId }: { shareId: string }) {
     }
   }
 
+  async function installApp() {
+    if (!installPrompt) return;
+    await installPrompt.prompt();
+    await installPrompt.userChoice;
+    setInstallPrompt(null);
+  }
+
   function placeMapUrl(place: SharedPlace) {
     const params = new URLSearchParams({ api: '1', query: place.name + (place.address ? `, ${place.address}` : '') });
     if (place.placeId) params.set('query_place_id', place.placeId);
@@ -228,6 +253,7 @@ export function SharedMapView({ shareId }: { shareId: string }) {
       <div className="shared-tools"><label className="language-picker" aria-label={language === 'en' ? 'Language' : language === 'es' ? 'Idioma' : 'Idioma'}><span>{language.toUpperCase()}</span><select value={language} onChange={(event) => changeLanguage(event.target.value)}><option value="pt">Português</option><option value="es">Español</option><option value="en">English</option></select></label><button className="theme-toggle" onClick={toggleTheme} aria-label={dark ? 'Light mode' : 'Dark mode'}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button></div>
     </header>
     <section className="shared-map-main">
+      {!loading && showInstallHelp && <aside className="shared-install-tip"><div><strong>{copy.installTitle}</strong><p>{isIos ? copy.installIos : copy.installAndroid}</p></div>{installPrompt && <button type="button" onClick={() => void installApp()}>{copy.install}</button>}</aside>}
       {loading ? <div className="share-state"><span className="search-spinner" /><p>{copy.loading}</p></div> : !user ? <section className="share-signin-card">
         <span className="share-hero-icon"><MapPin size={28} /></span><span className="share-eyebrow">{copy.label}</span><h1>{copy.signIn}</h1><p>{copy.signInHelp}</p>
         <div ref={googleButton} className="google-login-button" />

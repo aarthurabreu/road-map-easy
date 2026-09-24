@@ -23,7 +23,7 @@ function runtime() {
   const rows = new Map();
   const accounts = new Map();
   const shares = new Map();
-  const state = { dbCalls: 0, googleCalls: 0, cookie: '', requests: [] };
+  const state = { dbCalls: 0, googleCalls: 0, cookie: '', requests: [], emailCalls: [] };
   const db = {
     prepare(sql) {
       state.dbCalls++;
@@ -90,6 +90,10 @@ function runtime() {
     if (String(url).startsWith('https://oauth2.googleapis.com/tokeninfo?')) {
       state.googleCalls++;
       return Response.json({ aud: 'test-client', sub: 'B', email: 'b@example.invalid', email_verified: 'true', exp: String(Math.floor(Date.now() / 1000) + 3600) });
+    }
+    if (url === 'https://api.resend.com/emails') {
+      state.emailCalls.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? '{}')) });
+      return Response.json({ id: 'resend-test-id' });
     }
     const request = new Request(`https://app.example.invalid${url}`, {
       ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), Cookie: state.cookie, Origin: 'https://app.example.invalid' },
@@ -246,7 +250,9 @@ test('map shares are email-bound, owner-scoped, revocable and exclude personal n
   assert.equal((await shares.POST(req('/api/shares', { Cookie: ownerCookie, 'X-Roamly-Account': owner }, JSON.stringify({ mapName: 'Roma', email: 'friend@example.invalid' })))).status, 403);
   const created = await shares.POST(req('/api/shares', headers, JSON.stringify({ mapName: 'Roma', email: ' Friend@Example.Invalid ' })));
   assert.equal(created.status, 201);
-  const { shareId } = await created.json();
+  const createdPayload = await created.json();
+  const { shareId } = createdPayload;
+  assert.equal(createdPayload.emailSent, false);
   assert.ok(shareId);
   const duplicate = await shares.POST(req('/api/shares', headers, JSON.stringify({ mapName: 'Roma', email: 'friend@example.invalid' })));
   assert.equal((await duplicate.json()).shareId, shareId);
@@ -296,6 +302,29 @@ test('map shares are email-bound, owner-scoped, revocable and exclude personal n
   assert.equal(deletedAccount.status, 200);
   assert.equal(r.shares.size, 0);
   assert.equal((await shares.GET(req(`/api/shares?shareId=${secondShareId}`, { Cookie: inviteeCookie }, '', 'GET'))).status, 404);
+});
+
+test('new invitations send a trusted Easy Road Map email through Resend when configured', async () => {
+  const r = runtime();
+  r.context.process.env.RESEND_API_KEY = 'test-resend-key';
+  r.context.process.env.RESEND_FROM_EMAIL = 'invites@example.invalid';
+  const ownerCookie = cookiePair(await r.auth.createSessionCookie(user('A'), req('/')));
+  const owner = accountHeader(ownerCookie);
+  r.rows.set('A', JSON.stringify({ maps: ['Paris <script>alert(1)</script>'], currentMap: '', places: [] }));
+  const csrf = await challenge(r);
+  const headers = { Cookie: `${ownerCookie}; ${csrf.cookie}`, 'X-Roamly-CSRF': csrf.token, 'X-Roamly-Account': owner };
+  const shares = r.load('app/api/shares/route.ts');
+  const created = await shares.POST(req('/api/shares', headers, JSON.stringify({ mapName: 'Paris <script>alert(1)</script>', email: 'friend@example.invalid' })));
+  assert.equal(created.status, 201);
+  const payload = await created.json();
+  assert.equal(payload.emailSent, true);
+  assert.equal(r.state.emailCalls.length, 1);
+  const email = r.state.emailCalls[0];
+  assert.equal(email.headers.get('Authorization'), 'Bearer test-resend-key');
+  assert.deepEqual(email.body.to, ['friend@example.invalid']);
+  assert.match(email.body.html, /https:\/\/roamly-trip-guide-arthur\.arthurmaquizito\.chatgpt\.site\/share\//);
+  assert.match(email.body.html, /&lt;script&gt;/);
+  assert.doesNotMatch(email.body.html, /<script>alert/);
 });
 
 test('all five cache copies are owner-scoped; legacy data stays guest-only and account IDs cannot alias guest', () => {
