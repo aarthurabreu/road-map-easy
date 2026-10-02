@@ -2,6 +2,8 @@ import { database } from '../_lib/db';
 import { getSessionUser } from '../_lib/auth';
 import { checkAuthMutation, checkExpectedAccount } from '../_lib/request-security';
 import { withoutDistance } from '../../data-privacy';
+import { createInvitation } from '../_lib/invitations';
+import { parsePlace } from '../../place-schema';
 
 export const runtime = 'edge';
 
@@ -17,42 +19,15 @@ function privateResponse(body: unknown, status = 200) {
 }
 
 function sanitizedPlace(value: unknown) {
-  const place = withoutDistance(value) as Record<string, unknown>;
-  const fields = ['id', 'placeId', 'name', 'category', 'address', 'hours', 'status', 'statusLabel', 'photo', 'x', 'y', 'rating', 'destination', 'lat', 'lng', 'googleMapsURI', 'photoAttribution', 'pinColor'];
-  return Object.fromEntries(fields.filter((field) => place[field] !== undefined).map((field) => [field, place[field]]));
+  const parsed = parsePlace(value, { strict: true });
+  if (!parsed.place) return null;
+  const place = withoutDistance(parsed.place) as Record<string, unknown>;
+  delete place.note;
+  return place;
 }
 
-function escapeHtml(value: string) {
-  return value.replace(/[&<>\"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character);
-}
-
-async function sendInviteEmail(to: string, mapName: string, shareId: string) {
-  const apiKey = process.env.RESEND_API_KEY?.trim();
-  const sender = process.env.RESEND_FROM_EMAIL?.trim();
-  if (!apiKey || !sender || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(sender)) return false;
-  const link = `https://roamly-trip-guide-arthur.arthurmaquizito.chatgpt.site/share/${encodeURIComponent(shareId)}`;
-  const safeMap = escapeHtml(mapName);
-  const safeTo = escapeHtml(to);
-  const safeSubject = mapName.replace(/[\r\n]+/g, ' ');
-  const text = `Você foi convidado para ver o roteiro “${mapName}” no Easy Road Map. Entre com a Conta Google ${to} e abra este link: ${link}`;
-  try {
-    const result = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: `Easy Road Map <${sender}>`,
-        to: [to],
-        subject: `Convite para o roteiro ${safeSubject}`,
-        text,
-        html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:28px;color:#19251d"><p style="font-size:12px;font-weight:700;letter-spacing:.12em;color:#1f7a50">EASY ROAD MAP</p><h1 style="font-size:26px">Seu próximo roteiro está esperando</h1><p>Você foi convidado para ver o roteiro <strong>“${safeMap}”</strong>.</p><p>Abra usando a Conta Google <strong>${safeTo}</strong> que recebeu este convite.</p><p style="margin:28px 0"><a href="${link}" style="display:inline-block;padding:14px 20px;border-radius:10px;background:#1f7a50;color:#fff;text-decoration:none;font-weight:700">Abrir roteiro</a></p><p style="font-size:13px;color:#647168">Se o botão não funcionar, copie este link: <a href="${link}">${link}</a></p></div>`,
-      }),
-    });
-    return result.ok;
-  } catch { return false; }
-}
-
-async function loadOwnerItinerary(userId: string) {
-  const row = await database().prepare('SELECT data_json FROM user_itineraries WHERE user_id = ?').bind(userId).first<{ data_json: string }>();
+async function loadOwnerItinerary(userId: string, generation: string) {
+  const row = await database().prepare('SELECT data_json FROM user_itineraries WHERE user_id = ? AND EXISTS (SELECT 1 FROM user_accounts WHERE user_id = ? AND generation = ?)').bind(userId, userId, generation).first<{ data_json: string }>();
   if (!row) return null;
   try { return JSON.parse(row.data_json) as Itinerary; } catch { return null; }
 }
@@ -69,12 +44,13 @@ export async function GET(request: Request) {
       if (!share || share.invited_email !== user.email.trim().toLowerCase()) return privateResponse({ error: 'Este convite não está disponível para esta conta.' }, 404);
       const currentOwner = await database().prepare('SELECT generation FROM user_accounts WHERE user_id = ?').bind(share.owner_user_id).first<{ generation: string }>();
       if (currentOwner?.generation !== share.owner_generation) return privateResponse({ error: 'Este convite não está disponível.' }, 404);
-      const itinerary = await loadOwnerItinerary(share.owner_user_id);
+      const itinerary = await loadOwnerItinerary(share.owner_user_id, share.owner_generation);
       const maps = Array.isArray(itinerary?.maps) ? itinerary.maps.filter((map): map is string => typeof map === 'string') : [];
       if (!maps.includes(share.map_name)) return privateResponse({ error: 'Este mapa foi removido ou o convite foi revogado.' }, 404);
       const rawPlaces = Array.isArray(itinerary?.places) ? itinerary.places : [];
-      const places = rawPlaces.filter((place) => place && typeof place === 'object' && ((place as { destination?: unknown }).destination ?? 'Madri') === share.map_name).map(sanitizedPlace);
-      return privateResponse({ map: { name: share.map_name, places } });
+      const selected = rawPlaces.filter((place) => place && typeof place === 'object' && ((place as { destination?: unknown }).destination ?? 'Madri') === share.map_name);
+      const parsed = selected.map(sanitizedPlace);
+      return privateResponse({ map: { name: share.map_name, places: parsed.filter(Boolean) }, invalidCount: parsed.filter((place) => !place).length });
     }
 
     const mismatch = checkExpectedAccount(request, user);
@@ -105,20 +81,13 @@ export async function POST(request: Request) {
       return privateResponse({ error: 'Informe um mapa e um e-mail válido.' }, 400);
     }
     if (email === user.email.trim().toLowerCase()) return privateResponse({ error: 'Use o e-mail de outra pessoa para compartilhar.' }, 400);
-    const itinerary = await loadOwnerItinerary(user.id);
+    const itinerary = await loadOwnerItinerary(user.id, user.generation);
     const maps = Array.isArray(itinerary?.maps) ? itinerary.maps.filter((map): map is string => typeof map === 'string') : [];
     if (!maps.includes(mapName)) return privateResponse({ error: 'Este mapa não está salvo na sua conta.' }, 404);
-    const db = database();
-    const count = await db.prepare('SELECT COUNT(*) AS total FROM map_shares WHERE owner_user_id = ? AND owner_generation = ? AND map_name = ?').bind(user.id, user.generation, mapName).first<{ total: number }>();
-    const existing = await db.prepare('SELECT share_id FROM map_shares WHERE owner_user_id = ? AND owner_generation = ? AND map_name = ? AND invited_email = ?').bind(user.id, user.generation, mapName, email).first<{ share_id: string }>();
-    if (existing) return privateResponse({ shareId: existing.share_id, email, mapName, created: false, emailSent: false });
-    if ((count?.total ?? 0) >= 50) return privateResponse({ error: 'Este mapa já atingiu o limite de 50 convites.' }, 429);
-    const shareId = crypto.randomUUID();
-    await db.prepare('INSERT INTO map_shares (share_id, owner_user_id, owner_generation, map_name, invited_email, created_at) SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM user_accounts WHERE user_id = ? AND generation = ?)').bind(shareId, user.id, user.generation, mapName, email, Date.now(), user.id, user.generation).run();
-    const created = await db.prepare('SELECT share_id FROM map_shares WHERE owner_user_id = ? AND owner_generation = ? AND map_name = ? AND invited_email = ?').bind(user.id, user.generation, mapName, email).first<{ share_id: string }>();
-    if (!created) return unauthorized();
-    const emailSent = await sendInviteEmail(email, mapName, created.share_id);
-    return privateResponse({ shareId: created.share_id, email, mapName, created: true, emailSent }, 201);
+    const result = await createInvitation(user, mapName, email);
+    if (result.kind === 'account-changed') return unauthorized();
+    if (result.kind === 'capacity') return privateResponse({ error: 'Este mapa já atingiu o limite de 50 convites.' }, 429);
+    return privateResponse({ shareId: result.shareId, email, mapName, created: result.kind === 'created', emailSent: result.emailSent, emailRateLimited: result.emailRateLimited }, result.kind === 'created' ? 201 : 200);
   } catch {
     return privateResponse({ error: 'Não foi possível criar o convite. Tente novamente.' }, 500);
   }

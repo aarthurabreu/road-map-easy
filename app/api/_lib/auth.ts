@@ -21,6 +21,7 @@ type GoogleTokenInfo = {
 const cookieName = 'roamly_session';
 const sessionLifetimeSeconds = 60 * 60 * 24 * 7;
 const challengeCookieName = 'roamly_login_challenge';
+type SignedSession = SessionUser & { sid: string; exp: number };
 
 function clientId() {
   return process.env.GOOGLE_OAUTH_CLIENT_ID?.trim() ?? '';
@@ -45,6 +46,12 @@ async function signature(value: string) {
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const bytes = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value));
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+// Domain-separated, non-reversible keys keep short-lived anti-abuse records
+// independent of account generations without retaining raw IDs or emails.
+export function invitationFingerprint(kind: 'account' | 'recipient', value: string) {
+  return signature(`invitation-budget:${kind}:${value}`);
 }
 
 function timingSafeEqual(a: string, b: string) {
@@ -112,7 +119,23 @@ export async function createSessionCookie(user: GoogleUser, request: Request) {
   await db.prepare('INSERT OR IGNORE INTO user_accounts (user_id, generation) VALUES (?, ?)').bind(user.id, crypto.randomUUID()).run();
   const account = await db.prepare('SELECT generation FROM user_accounts WHERE user_id = ?').bind(user.id).first<{ generation: string }>();
   if (!account) throw new Error('Não foi possível iniciar a conta. Tente novamente.');
-  const payload = encode(JSON.stringify({ ...user, generation: account.generation, exp: Math.floor(Date.now() / 1000) + sessionLifetimeSeconds }));
+  const now = Math.floor(Date.now() / 1000);
+  const sid = crypto.randomUUID();
+  const exp = now + sessionLifetimeSeconds;
+  await db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').bind(now).run();
+  const previous = await readSignedSession(request);
+  const register = db.prepare(`
+    INSERT INTO auth_sessions (session_id, user_id, generation, expires_at)
+    SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM user_accounts WHERE user_id = ? AND generation = ?)
+  `).bind(sid, user.id, account.generation, exp, user.id, account.generation);
+  const statements = [register];
+  if (previous) statements.push(db.prepare(`
+    DELETE FROM auth_sessions WHERE session_id = ? AND user_id = ? AND generation = ?
+      AND EXISTS (SELECT 1 FROM auth_sessions WHERE session_id = ?)
+  `).bind(previous.sid, previous.id, previous.generation, sid));
+  const [saved] = await db.batch(statements);
+  if (!saved.meta.changes) throw new Error('A conta mudou. Entre novamente.');
+  const payload = encode(JSON.stringify({ ...user, generation: account.generation, sid, exp }));
   const signed = `${payload}.${await signature(payload)}`;
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
   return `${cookieName}=${signed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sessionLifetimeSeconds}${secure}`;
@@ -123,22 +146,42 @@ export function clearSessionCookie(request: Request) {
   return `${cookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
 }
 
-export async function getSessionUser(request: Request): Promise<SessionUser | null> {
-  const cookieHeader = request.headers.get('cookie') ?? '';
-  const value = cookieHeader.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
-  if (!value) return null;
+async function readSignedSession(request: Request): Promise<SignedSession | null> {
+  const value = cookieValue(request, cookieName);
+  if (!value || value.length > 16_384) return null;
   const separator = value.lastIndexOf('.');
   if (separator < 1) return null;
   const payload = value.slice(0, separator);
   const receivedSignature = value.slice(separator + 1);
   try {
     if (!timingSafeEqual(receivedSignature, await signature(payload))) return null;
-    const parsed = JSON.parse(decode(payload)) as SessionUser & { exp?: number };
-    if (!parsed.id || !parsed.email || !parsed.generation || !parsed.exp || parsed.exp <= Math.floor(Date.now() / 1000)) return null;
-    const account = await database().prepare('SELECT generation FROM user_accounts WHERE user_id = ?').bind(parsed.id).first<{ generation: string }>();
-    if (account?.generation !== parsed.generation) return null;
-    return { id: parsed.id, email: parsed.email, name: parsed.name || parsed.email, picture: parsed.picture, generation: parsed.generation };
+    const parsed = JSON.parse(decode(payload)) as SignedSession;
+    if (typeof parsed.id !== 'string' || !parsed.id || typeof parsed.email !== 'string' || !parsed.email || typeof parsed.generation !== 'string' || !parsed.generation
+      || typeof parsed.sid !== 'string' || !/^[0-9a-f-]{36}$/i.test(parsed.sid) || !Number.isSafeInteger(parsed.exp) || parsed.exp <= Math.floor(Date.now() / 1000)) return null;
+    return parsed;
   } catch {
     return null;
   }
+}
+
+export async function getSessionUser(request: Request): Promise<SessionUser | null> {
+  const parsed = await readSignedSession(request);
+  if (!parsed) return null;
+  try {
+    const active = await database().prepare(`
+      SELECT s.session_id FROM auth_sessions s
+      JOIN user_accounts a ON a.user_id = s.user_id AND a.generation = s.generation
+      WHERE s.session_id = ? AND s.user_id = ? AND s.generation = ? AND s.expires_at = ? AND s.expires_at > ?
+    `).bind(parsed.sid, parsed.id, parsed.generation, parsed.exp, Math.floor(Date.now() / 1000)).first();
+    if (!active) return null;
+    // Do not expose the server's session identifier through /api/auth/session.
+    return { id: parsed.id, email: parsed.email, name: parsed.name || parsed.email, picture: parsed.picture, generation: parsed.generation };
+  } catch { return null; }
+}
+
+export async function revokeSession(request: Request, user: SessionUser) {
+  const parsed = await readSignedSession(request);
+  if (!parsed || parsed.id !== user.id || parsed.generation !== user.generation) throw new Error('Sessão inválida');
+  await database().prepare('DELETE FROM auth_sessions WHERE session_id = ? AND user_id = ? AND generation = ?')
+    .bind(parsed.sid, user.id, user.generation).run();
 }

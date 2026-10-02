@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, Mail, Share2, Trash2, X } from 'lucide-react';
 import type { Language } from './i18n';
 import { accountFetch, authChallenge } from './account-storage';
@@ -25,22 +25,26 @@ export function MapShareDialog({ mapName, language, email, identity, onClose }: 
   }[language];
   const pathFor = (shareId: string) => `${window.location.origin}/share/${encodeURIComponent(shareId)}`;
 
-  async function loadShares() {
-    setError('');
-    try {
-      const response = await accountFetch(identity, `/api/shares?mapName=${encodeURIComponent(mapName)}`);
-      if (!response.ok) throw new Error(copy.failure);
-      const result = await response.json() as { shares?: MapShare[] };
-      setShares(result.shares ?? []);
-    } catch { setError(copy.failure); }
-  }
+  const loadShares = useCallback(async () => {
+    const response = await accountFetch(identity, `/api/shares?mapName=${encodeURIComponent(mapName)}`);
+    if (!response.ok) throw new Error(copy.failure);
+    const result = await response.json() as { shares?: MapShare[] };
+    return result.shares ?? [];
+  }, [identity, mapName, copy.failure]);
 
   useEffect(() => {
     const element = dialog.current;
     element?.showModal();
-    void loadShares();
     return () => element?.close();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadShares().then((result) => {
+      if (!cancelled) { setShares(result); setError(''); }
+    }).catch(() => { if (!cancelled) setError(copy.failure); });
+    return () => { cancelled = true; };
+  }, [loadShares, copy.failure]);
 
   async function createInvite(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -53,11 +57,14 @@ export function MapShareDialog({ mapName, language, email, identity, onClose }: 
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Roamly-CSRF': csrf },
         body: JSON.stringify({ mapName, email: normalizedEmail }),
       });
-      const result = await response.json() as { shareId?: string; email?: string; error?: string; created?: boolean; emailSent?: boolean };
+      const result = await response.json() as { shareId?: string; email?: string; error?: string; created?: boolean; emailSent?: boolean; emailRateLimited?: boolean };
       if (!response.ok || !result.shareId) throw new Error(result.error || copy.failure);
       setInviteEmail('');
-      setNotice(result.created ? (result.emailSent ? copy.created : copy.emailFailed) : copy.already);
-      await loadShares();
+      const limited = language === 'pt' ? 'Convite criado. O limite temporário de e-mails foi atingido; copie o link abaixo para enviar manualmente.'
+        : language === 'es' ? 'Invitación creada. Se alcanzó el límite temporal de correos; copia el enlace de abajo para enviarlo manualmente.'
+        : 'Invite created. The temporary email limit was reached; copy the link below to send it manually.';
+      setNotice(result.created ? (result.emailSent ? copy.created : result.emailRateLimited ? limited : copy.emailFailed) : copy.already);
+      setShares(await loadShares());
       try { await navigator.clipboard.writeText(pathFor(result.shareId)); } catch { /* The copy and mail controls remain available below. */ }
     } catch (cause) { setError(cause instanceof Error ? cause.message : copy.failure); }
     finally { setBusy(false); }

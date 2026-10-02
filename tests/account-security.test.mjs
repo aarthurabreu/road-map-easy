@@ -3,110 +3,20 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
-import { webcrypto } from 'node:crypto';
+import { runtime, memoryStorage } from './helpers/runtime.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const page = readFileSync(path.join(root, 'app/page.tsx'), 'utf8');
+const page = readFileSync(path.join(root, 'app/trip-guide/use-trip-guide.ts'), 'utf8');
 const ast = ts.createSourceFile('page.tsx', page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-const home = ast.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'Home');
+const home = ast.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'useTripGuide');
 const compile = (source) => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
 const tick = () => new Promise((resolve) => setImmediate(resolve));
-
-function memoryStorage() {
-  const data = new Map();
-  return { getItem: (key) => data.get(key) ?? null, setItem: (key, value) => data.set(key, value) };
-}
-
-function runtime() {
-  const rows = new Map();
-  const accounts = new Map();
-  const shares = new Map();
-  const state = { dbCalls: 0, googleCalls: 0, cookie: '', requests: [], emailCalls: [] };
-  const db = {
-    prepare(sql) {
-      state.dbCalls++;
-      return { bind(...args) { return {
-        async first() {
-          if (sql.includes('SELECT generation')) return accounts.has(args[0]) ? { generation: accounts.get(args[0]) } : null;
-          if (sql.includes('COUNT(*) AS total FROM map_shares')) return { total: [...shares.values()].filter((share) => share.owner_user_id === args[0] && share.owner_generation === args[1] && share.map_name === args[2]).length };
-          if (sql.includes('FROM map_shares')) {
-            if (sql.includes('invited_email = ?')) return [...shares.values()].find((share) => share.owner_user_id === args[0] && share.owner_generation === args[1] && share.map_name === args[2] && share.invited_email === args[3]) ?? null;
-            return shares.get(args[0]) ?? null;
-          }
-          return rows.has(args[0]) ? { data_json: rows.get(args[0]), updated_at: 1 } : null;
-        },
-        async all() {
-          if (sql.includes('FROM map_shares')) return { results: [...shares.values()].filter((share) => share.owner_user_id === args[0] && share.owner_generation === args[1] && (!sql.includes('map_name = ?') || share.map_name === args[2])) };
-          return { results: [] };
-        },
-        async run() {
-          if (sql.includes('INSERT OR IGNORE INTO user_accounts')) { if (!accounts.has(args[0])) accounts.set(args[0], args[1]); }
-          else if (sql.includes('INSERT INTO map_shares')) { if (!sql.includes('WHERE EXISTS') || accounts.get(args[6]) === args[7]) shares.set(args[0], { share_id: args[0], owner_user_id: args[1], owner_generation: args[2], map_name: args[3], invited_email: args[4], created_at: args[5] }); }
-          else if (sql.includes('DELETE FROM map_shares')) {
-            for (const [shareId, share] of shares) {
-              const ownerMatches = share.owner_user_id === args[0] && share.owner_generation === args[1];
-              if (sql.includes('share_id = ?')) { if (shareId === args[0] && share.owner_user_id === args[1] && share.owner_generation === args[2]) shares.delete(shareId); }
-              else if (ownerMatches && (sql.includes('map_name NOT IN') ? !args.slice(2).includes(share.map_name) : true)) shares.delete(shareId);
-            }
-          }
-          else if (sql.includes('INSERT INTO user_itineraries')) {
-            const accountAllowed = !sql.includes('WHERE EXISTS') || accounts.get(args[3]) === args[4];
-            const shareAllowed = !sql.includes('FROM map_shares s') || [...shares.values()].some((share) => share.share_id === args[5] && share.invited_email === args[6] && share.owner_generation === args[7] && accounts.get(share.owner_user_id) === share.owner_generation);
-            const allowed = accountAllowed && shareAllowed;
-            if (allowed) rows.set(args[0], args[1]);
-            return { meta: { changes: allowed ? 1 : 0 } };
-          }
-          else if (sql.includes('DELETE FROM user_itineraries')) rows.delete(args[0]);
-          else if (sql.includes('DELETE FROM user_accounts')) accounts.delete(args[0]);
-          return { meta: { changes: 1 } };
-        },
-      }; } };
-    },
-  };
-  db.batch = async (statements) => Promise.all(statements.map((statement) => statement.run()));
-  const context = vm.createContext({
-    crypto: webcrypto, Request, Response, Headers, URL, TextEncoder, btoa, atob,
-    encodeURIComponent, decodeURIComponent, escape, unescape,
-    process: { env: { GOOGLE_OAUTH_CLIENT_ID: 'test-client', GOOGLE_AUTH_SESSION_SECRET: 'synthetic-test-secret-only' } },
-    localStorage: memoryStorage(),
-  });
-  const cache = new Map();
-  function load(relative) {
-    const absolute = path.resolve(root, relative);
-    if (cache.has(absolute)) return cache.get(absolute);
-    const exports = {};
-    cache.set(absolute, exports);
-    const require = (name) => {
-      if (name.endsWith('/_lib/db') || (name === './db' && relative.endsWith('app/api/_lib/auth.ts'))) return { database: () => db, ensureDatabase: async () => {} };
-      return load(path.resolve(path.dirname(absolute), name) + '.ts');
-    };
-    const wrapper = vm.runInContext(`(function(exports, require) { ${compile(readFileSync(absolute, 'utf8'))}\n})`, context);
-    wrapper(exports, require);
-    return exports;
-  }
-  context.fetch = async (url, init) => {
-    if (String(url).startsWith('https://oauth2.googleapis.com/tokeninfo?')) {
-      state.googleCalls++;
-      return Response.json({ aud: 'test-client', sub: 'B', email: 'b@example.invalid', email_verified: 'true', exp: String(Math.floor(Date.now() / 1000) + 3600) });
-    }
-    if (url === 'https://api.resend.com/emails') {
-      state.emailCalls.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? '{}')) });
-      return Response.json({ id: 'resend-test-id' });
-    }
-    const request = new Request(`https://app.example.invalid${url}`, {
-      ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), Cookie: state.cookie, Origin: 'https://app.example.invalid' },
-    });
-    state.requests.push(request);
-    if (url === '/api/sync') return load('app/api/sync/route.ts')[request.method](request);
-    if (url === '/api/shares/import') return load('app/api/shares/import/route.ts').POST(request);
-    throw new Error(`Unexpected network call: ${url}`);
-  };
-  const auth = load('app/api/_lib/auth.ts');
-  const security = load('app/account-storage.ts');
-  Object.assign(context, security);
-  return { context, state, rows, accounts, shares, db, auth, security, load };
+async function waitUntil(predicate) {
+  const deadline = Date.now() + 2000;
+  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.ok(predicate(), 'Expected asynchronous operation to finish');
 }
 
 const user = (id) => ({ id, generation: `gen-${id}`, email: `${id.toLowerCase()}@example.invalid`, name: id });
@@ -194,7 +104,7 @@ test('GET and PUT reject stale/missing owner before DB access; valid same-accoun
   }
   assert.ok(r.state.dbCalls > 0); // generation lookup occurs before validating account header
   assert.equal(r.rows.get('B'), original);
-  const valid = req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': owner }, '{"maps":["B new"],"currentMap":"B new","places":[{"placeId":"p","distance":"3 km"}],"user_id":"A"}', 'PUT');
+  const valid = req('/api/sync', { Cookie: r.state.cookie, 'X-Roamly-Account': owner }, JSON.stringify({ maps: ['B new'], currentMap: 'B new', places: [{ placeId: 'p', distance: '3 km' }], user_id: 'A', baseRevision: 0, mutationIds: [crypto.randomUUID()] }), 'PUT');
   assert.equal((await sync.PUT(valid)).status, 200);
   assert.equal(r.rows.has('A'), false);
   assert.equal(JSON.parse(r.rows.get('B')).places[0].distance, undefined);
@@ -278,7 +188,7 @@ test('map shares are email-bound, owner-scoped, revocable and exclude personal n
   const importRoute = r.load('app/api/shares/import/route.ts').POST;
   const saved = await importRoute(req('/api/shares/import', importHeaders, JSON.stringify({ shareId })));
   assert.equal(saved.status, 200);
-  assert.deepEqual(await saved.json(), { ok: true, mapName: 'Roma', addedCount: 1 });
+  assert.deepEqual(await saved.json(), { ok: true, mapName: 'Roma', addedCount: 1, revision: 1 });
   const recipientData = JSON.parse(r.rows.get('B'));
   assert.deepEqual(recipientData.maps, ['Roma']);
   assert.equal(recipientData.currentMap, 'Roma');
@@ -345,11 +255,14 @@ test('all five cache copies are owner-scoped; legacy data stays guest-only and a
 });
 
 function installPageFunctions(r) {
-  for (const name of ['placeKey', 'dedupePlaces', 'restoreLocalItinerary', 'saveCloudState']) {
-    const declaration = ast.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
-    vm.runInContext(compile(declaration.getText(ast)), r.context);
+  for (const name of ['placeKey', 'dedupePlaces', 'restoreLocalItinerary']) {
+    const file = 'place-model.ts';
+    const source = readFileSync(path.join(root, 'app/trip-guide', file), 'utf8');
+    const modelAst = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const declaration = modelAst.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    vm.runInContext(compile(declaration.getText(modelAst).replace(/^export /, '')), r.context);
   }
-  Object.assign(r.context, { initialPlaces: [], legacyPlaceIds: { old: 'new' }, removedPlacesStorageKey: 'roamly-removed-place-keys', accountIdentity: identity, withoutDistance: ({ distance, ...place }) => place, clearOtherAccountGenerations() {} });
+  Object.assign(r.context, { readSafeItinerary: r.load('app/place-schema.ts').readSafeItinerary, browserStorage: () => r.context.localStorage, initialPlaces: [], legacyPlaceIds: { old: 'new' }, removedPlacesStorageKey: 'roamly-removed-place-keys', accountIdentity: identity, withoutDistance: (place) => { const result = { ...place }; delete result.distance; return result; }, clearOtherAccountGenerations() {} });
 }
 
 function effectSource(fragment) {
@@ -384,12 +297,13 @@ test('actual old-tab autosave sends captured A, is rejected under cookie B and n
   Object.assign(r.context, {
     authUser: user('A'), cacheOwner: identity(user('A')), storageReady: true,
     cloudLoadedForUserRef: { current: identity(user('A')) }, accountActiveRef: { current: true },
-    maps: ['A'], currentMap: 'A', places: [{ id: 'p', placeId: 'p', note: 'secret A' }],
+    syncEngineRef: { current: new (r.load('app/trip-guide/sync-engine.ts').SyncEngine)(identity(user('A')), r.context.localStorage, { maps: ['A'], currentMap: 'A', places: [] }, () => r.context.accountActiveRef.current) },
+    navigator: { onLine: true }, applySyncResult() {},
     setSyncStatus: (value) => flags.statuses.push(value), reloadForAccountChange: () => flags.reloads++,
     window: { setTimeout: (fn) => { timers.push(fn); return 1; }, clearTimeout() {} },
   });
-  vm.runInContext(compile(`(${effectSource('saveCloudState(owner')})()`), r.context);
-  timers[0](); await tick(); await tick();
+  vm.runInContext(compile(`(${effectSource('const timer = window.setTimeout')})()`), r.context);
+  timers[0](); await waitUntil(() => flags.reloads === 1);
   assert.equal(r.state.requests[0].headers.get('x-roamly-account'), identity(user('A')));
   assert.equal(r.rows.get('B'), '{"private":"original B"}');
   assert.deepEqual(r.rows.get('B'), '{"private":"original B"}');
@@ -412,13 +326,15 @@ test('empty-account load never uploads guest data without explicit consent; exis
     Object.assign(r.context, {
       authUser: sessionUser(r.state.cookie), cacheOwner: accountHeader(r.state.cookie), storageReady: true, language: 'pt',
       cloudLoadedForUserRef: { current: '' }, accountActiveRef: { current: true }, hydratedPlaceKeysRef: { current: new Set() },
+      syncEngineRef: { current: new (r.load('app/trip-guide/sync-engine.ts').SyncEngine)(accountHeader(r.state.cookie), r.context.localStorage, { maps: [], currentMap: '', places: [] }) },
+      navigator: { onLine: true }, applySyncResult: (result) => { seen.maps = result.data.maps; seen.places = result.data.places; },
       setSyncStatus() {}, setMaps: (value) => { seen.maps = value; }, setCurrentMap() {}, setPlaces: (value) => { seen.places = value; }, setSelectedId() {},
       reloadForAccountChange() { throw new Error('Unexpected account change'); },
       window: { confirm: () => { seen.prompts++; return consent === true; } },
     });
-    vm.runInContext(compile(`(${effectSource('const guestStorage')})()`), r.context);
-    await tick(); await tick();
-    assert.equal(r.state.requests.filter((request) => request.method === 'PUT').length, 0);
+    vm.runInContext(compile(`(${effectSource('const offerGuest')})()`), r.context);
+    await waitUntil(() => seen.places !== null);
+    assert.equal(r.state.requests.filter((request) => request.method === 'PUT').length, consent === true ? 1 : 0);
     assert.equal(seen.prompts, consent === 'existing' ? 0 : 1);
     assert.equal(seen.places.length, consent === true ? 1 : 0);
     assert.equal(seen.places[0]?.note, consent === true ? 'private legacy' : undefined);
@@ -430,16 +346,18 @@ test('cancelled cloud response cannot replace data or enable saving after accoun
   const r = runtime(); installPageFunctions(r);
   r.state.cookie = cookiePair(await r.auth.createSessionCookie(user('A'), req('/')));
   let resolve;
-  r.context.accountFetch = () => new Promise((done) => { resolve = done; });
+  r.security.accountFetch = () => new Promise((done) => { resolve = done; });
   Object.assign(r.context, {
     authUser: sessionUser(r.state.cookie), cacheOwner: accountHeader(r.state.cookie), storageReady: true, language: 'pt',
     cloudLoadedForUserRef: { current: '' }, accountActiveRef: { current: true },
+    syncEngineRef: { current: new (r.load('app/trip-guide/sync-engine.ts').SyncEngine)(accountHeader(r.state.cookie), r.context.localStorage, { maps: [], currentMap: '', places: [] }, () => r.context.accountActiveRef.current) },
+    navigator: { onLine: true }, applySyncResult() { throw new Error('Stale response applied'); },
     setSyncStatus() {}, setMaps() { throw new Error('Stale response applied'); },
   });
-  const cleanup = vm.runInContext(compile(`(${effectSource('const guestStorage')})()`), r.context);
+  const cleanup = vm.runInContext(compile(`(${effectSource('const offerGuest')})()`), r.context);
   cleanup();
   r.context.accountActiveRef.current = false;
-  resolve(Response.json({ userId: accountHeader(r.state.cookie), data: { maps: ['A'], currentMap: 'A', places: [] } }));
+  resolve(Response.json({ userId: accountHeader(r.state.cookie), revision: 0, data: { maps: ['A'], currentMap: 'A', places: [] } }));
   await tick(); await tick();
   assert.equal(r.context.cloudLoadedForUserRef.current, '');
 });
@@ -451,6 +369,7 @@ test('failed logout must not mark an uninitialized cloud snapshot ready for auto
     authUser: user('A'), cacheOwner: identity(user('A')), storageReady: true,
     accountActiveRef: { current: true }, cloudLoadedForUserRef: { current: '' },
     accountTransitionRef: { current: 0 },
+    syncEngineRef: { current: {} }, navigator: { onLine: true },
     authChallenge: async () => { throw new Error('Offline'); },
     setAuthLoading() {}, setAuthError() {}, setSyncAttempt() {},
     maps: ['New trip'], currentMap: 'New trip', places: [],
@@ -460,6 +379,26 @@ test('failed logout must not mark an uninitialized cloud snapshot ready for auto
   await r.context.logout();
   assert.equal(r.context.cloudLoadedForUserRef.current, '');
   assert.equal(r.context.accountActiveRef.current, true);
-  vm.runInContext(compile(`(${effectSource('saveCloudState(owner')})()`), r.context);
+  vm.runInContext(compile(`(${effectSource('const timer = window.setTimeout')})()`), r.context);
   assert.equal(r.state.requests.length, 0);
+});
+
+test('server-confirmed account deletion stays final when local cache cleanup is blocked', async () => {
+  const r = runtime(); installPageFunctions(r);
+  const declaration = home.body.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'deleteMyData');
+  let reloads = 0, warnings = 0;
+  Object.assign(r.context, { authUser: user('A'), language: 'pt', accountActiveRef: { current: true }, cloudLoadedForUserRef: { current: identity(user('A')) },
+    authChallenge: async () => 'token', accountFetch: async () => Response.json({ ok: true }), clearItineraryCache() { throw new Error('Storage blocked'); },
+    setStorageIssue() { warnings++; }, stopLocationTracking() {}, announceAccountChange() {}, reloadForAccountChange() { reloads++; },
+  });
+  vm.runInContext(compile(declaration.getText(ast)), r.context); await r.context.deleteMyData();
+  assert.equal(reloads, 1); assert.equal(warnings, 1); assert.equal(r.context.accountActiveRef.current, false); assert.equal(r.context.cloudLoadedForUserRef.current, '');
+});
+
+test('blocked cross-tab signaling cannot undo a confirmed account transition', () => {
+  const r = runtime(); r.context.BroadcastChannel = class { constructor() { throw new Error('Blocked'); } };
+  assert.doesNotThrow(() => r.security.announceAccountChange('A'));
+  let closed = 0;
+  r.context.BroadcastChannel = class { postMessage() { throw new Error('Blocked'); } close() { closed++; } };
+  assert.doesNotThrow(() => r.security.announceAccountChange('A')); assert.equal(closed, 1);
 });

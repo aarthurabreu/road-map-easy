@@ -35,10 +35,11 @@ export const accountChangeKey = 'roamly-account-change';
 
 export function announceAccountChange(deletedUserId?: string) {
   const message = { nonce: crypto.randomUUID(), ...(deletedUserId ? { deletedUserId } : {}) };
-  try { localStorage.setItem(accountChangeKey, JSON.stringify(message)); } catch { /* Server guards still enforce account isolation. */ }
-  if (typeof BroadcastChannel !== 'undefined') {
-    const channel = new BroadcastChannel(accountChangeKey);
-    channel.postMessage(message);
-    channel.close();
-  }
+  try { localStorage.removeItem('roamly-last-account'); localStorage.setItem(accountChangeKey, JSON.stringify(message)); } catch { /* Server guards still enforce account isolation. */ }
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const channel = new BroadcastChannel(accountChangeKey);
+      try { channel.postMessage(message); } finally { channel.close(); }
+    }
+  } catch { /* Browser restrictions must not undo a server-confirmed logout/deletion. */ }
 }

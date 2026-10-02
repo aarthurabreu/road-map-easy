@@ -4,7 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-const page = readFileSync(new URL('../app/page.tsx', import.meta.url), 'utf8');
+const page = readFileSync(new URL('../app/trip-guide/live-google-map.tsx', import.meta.url), 'utf8');
 const markers = readFileSync(new URL('../app/map-markers.ts', import.meta.url), 'utf8');
 const layout = readFileSync(new URL('../app/layout.tsx', import.meta.url), 'utf8');
 
@@ -12,7 +12,7 @@ function functionSource(name) {
   const ast = ts.createSourceFile('page.tsx', page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const declaration = ast.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
   assert.ok(declaration, `Missing ${name}`);
-  return declaration.getText(ast);
+  return declaration.getText(ast).replace(/^export /, '');
 }
 
 function runtime() {

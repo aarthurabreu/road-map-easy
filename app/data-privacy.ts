@@ -9,6 +9,11 @@ export function withoutDistance<T>(place: T): T extends object ? Omit<T, 'distan
   if (!place || typeof place !== 'object' || Array.isArray(place)) return place as never;
   const copy = { ...place } as Record<string, unknown>;
   delete copy.distance;
+  delete copy.openingSchedule;
+  // Google photo URIs expire and must be obtained fresh, not saved in backups,
+  // browser queues or cloud records. The Place ID remains the durable reference.
+  if (copy.photoSource === 'google') { copy.photo = ''; delete copy.photoAttribution; delete copy.photoAttributions; }
+  delete copy.photoSource;
   return copy as never;
 }
 

@@ -2,6 +2,8 @@ import { database } from '../_lib/db';
 import { clearBrowserChallenge, clearSessionCookie, getSessionUser } from '../_lib/auth';
 import { checkAuthMutation, checkExpectedAccount, checkMutation } from '../_lib/request-security';
 import { accountIdentity, withoutDistance } from '../../data-privacy';
+import { readItinerary, commitItinerary } from '../_lib/itinerary-revisions';
+import { parsePlace } from '../../place-schema';
 
 export const runtime = 'edge';
 
@@ -10,6 +12,8 @@ type CloudItinerary = {
   currentMap: string;
   places: unknown[];
   updatedAt: number;
+  baseRevision: number;
+  mutationIds: string[];
 };
 
 function unauthorized() {
@@ -22,11 +26,9 @@ export async function GET(request: Request) {
   const mismatch = checkExpectedAccount(request, user);
   if (mismatch) return mismatch;
   try {
-    const db = database();
-    const row = await db.prepare('SELECT data_json, updated_at FROM user_itineraries WHERE user_id = ?').bind(user.id).first<{ data_json: string; updated_at: number }>();
-    const data = row ? JSON.parse(row.data_json) : null;
-    if (data?.places) data.places = data.places.map(withoutDistance);
-    return Response.json({ userId: accountIdentity(user), data, updatedAt: row?.updated_at ?? null }, {
+    const pendingIds = new URL(request.url).searchParams.getAll('pending');
+    if (pendingIds.length > 100 || pendingIds.some((id) => !/^[0-9a-f-]{36}$/i.test(id))) return Response.json({ error: 'Fila inválida' }, { status: 400 });
+    return Response.json({ userId: accountIdentity(user), ...await readItinerary(user, pendingIds) }, {
       headers: { 'Cache-Control': 'no-store' },
     });
   } catch (error) {
@@ -43,25 +45,25 @@ export async function PUT(request: Request) {
   if (mismatch) return mismatch;
   try {
     const data = await request.json() as CloudItinerary;
+    if (!Number.isSafeInteger(data.baseRevision) || data.baseRevision < 0 || data.baseRevision >= Number.MAX_SAFE_INTEGER) {
+      return Response.json({ error: 'Atualize o aplicativo para sincronizar sem sobrescrever alterações.', code: 'revision_required' }, { status: 428, headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (!Array.isArray(data.mutationIds) || !data.mutationIds.length || data.mutationIds.length > 100 || new Set(data.mutationIds).size !== data.mutationIds.length || data.mutationIds.some((id) => typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id))) return Response.json({ error: 'Fila inválida' }, { status: 400 });
     if (!Array.isArray(data.maps) || data.maps.length > 100 || data.maps.some((map) => typeof map !== 'string' || map.trim().length > 120) || !Array.isArray(data.places) || typeof data.currentMap !== 'string') {
       return Response.json({ error: 'Dados do roteiro inválidos' }, { status: 400 });
     }
-    const payload = JSON.stringify({ maps: data.maps, currentMap: data.currentMap, places: data.places.map(withoutDistance), updatedAt: Date.now() });
+    const parsed = data.places.map((place) => parsePlace(place, { strict: true }));
+    if (parsed.some((item) => !item.place) || new Set(parsed.map((item) => item.place?.id)).size !== parsed.length) return Response.json({ error: 'Um local contém dados inválidos. Revise o roteiro antes de salvar.', code: 'invalid_place' }, { status: 422, headers: { 'Cache-Control': 'no-store' } });
+    data.places = parsed.map((item) => withoutDistance(item.place!));
+    const payload = JSON.stringify({ maps: data.maps, currentMap: data.currentMap, places: data.places, updatedAt: Date.now() });
     if (payload.length > 900_000) return Response.json({ error: 'Roteiro grande demais para sincronizar' }, { status: 413 });
 
-    const db = database();
-    const updatedAt = Date.now();
-    const saveStatement = db.prepare(`
-      INSERT INTO user_itineraries (user_id, data_json, updated_at)
-      SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM user_accounts WHERE user_id = ? AND generation = ?)
-      ON CONFLICT(user_id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at
-    `).bind(user.id, payload, updatedAt, user.id, user.generation);
-    const revokeRemovedMaps = data.maps.length
-      ? db.prepare(`DELETE FROM map_shares WHERE owner_user_id = ? AND owner_generation = ? AND map_name NOT IN (${data.maps.map(() => '?').join(',')})`).bind(user.id, user.generation, ...data.maps)
-      : db.prepare('DELETE FROM map_shares WHERE owner_user_id = ? AND owner_generation = ?').bind(user.id, user.generation);
-    const [saved] = await db.batch([saveStatement, revokeRemovedMaps]);
-    if (!saved.meta.changes) return unauthorized();
-    return Response.json({ ok: true, updatedAt }, { headers: { 'Cache-Control': 'no-store' } });
+    const result = await commitItinerary(user, data, data.baseRevision, data.mutationIds);
+    if (!result.saved) {
+      if (!await getSessionUser(request)) return unauthorized();
+      return Response.json({ code: 'revision_conflict', userId: accountIdentity(user), ...await readItinerary(user, data.mutationIds) }, { status: 412, headers: { 'Cache-Control': 'no-store' } });
+    }
+    return Response.json({ ok: true, ...result, acknowledgedIds: data.mutationIds }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : 'Não foi possível salvar seus roteiros' }, { status: 500 });
   }
@@ -79,6 +81,8 @@ export async function DELETE(request: Request) {
     // Atomic deletion plus generation-guarded writes prevent an in-flight save
     // or another device from restoring a deleted account's data.
     await db.batch([
+      db.prepare('DELETE FROM itinerary_mutations WHERE user_id = ? AND generation = ?').bind(user.id, user.generation),
+      db.prepare('DELETE FROM auth_sessions WHERE user_id = ? AND generation = ?').bind(user.id, user.generation),
       db.prepare('DELETE FROM map_shares WHERE owner_user_id = ? AND owner_generation = ?').bind(user.id, user.generation),
       db.prepare('DELETE FROM user_itineraries WHERE user_id = ? AND EXISTS (SELECT 1 FROM user_accounts WHERE user_id = ? AND generation = ?)').bind(user.id, user.id, user.generation),
       db.prepare('DELETE FROM user_accounts WHERE user_id = ? AND generation = ?').bind(user.id, user.generation),
