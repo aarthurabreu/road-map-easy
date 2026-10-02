@@ -16,6 +16,8 @@ Use Node 24 e pnpm 11.19.0. Instale com `pnpm install --frozen-lockfile`; execut
 
 Para usar um servidor **local de teste** existente, defina `ROAMLY_TEST_BASE_URL`. Para trocar a porta automática, defina `ROAMLY_TEST_PORT` (padrão 4173). Os testes de navegador interceptam APIs e bloqueiam serviços externos: não enviam e-mails nem gastam quota Google. Não são uma validação de entrega do Resend, OAuth real, GPS físico ou instalação no iPhone. Falhas salvam capturas em `test-results/`.
 
+Na suíte offline, `context.setOffline(true)` bloqueia a rede durante a nova navegação. O sinal `navigator.onLine`/evento de reconexão é simulado explicitamente devido ao [bug do Chromium embarcado no Playwright 1.62](https://github.com/microsoft/playwright/issues/42174). O teste aguarda a resposta de configuração, não um tempo fixo, e não altera o código do app para compensar o emulador.
+
 A automação `.github/workflows/checks.yml` verifica testes, tipos, lint, build e navegador em pushes para main/master e em PRs. Ela não publica o app. Sua primeira execução remota precisa ser acompanhada.
 
 ## Organização

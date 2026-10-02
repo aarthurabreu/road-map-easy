@@ -29,6 +29,13 @@ for (const { mobile, signedIn } of [{ mobile: false }, { mobile: true }, { mobil
       await route.fulfill({ json, headers: { 'Cache-Control': 'no-store' } });
     });
     await context.addInitScript(({ data, signedIn, user }) => {
+      // Playwright 1.62's bundled Chromium resets navigator.onLine incorrectly
+      // on a new offline document (#42174). Model connection signals explicitly;
+      // context.setOffline still blocks real network for the entire cold opening.
+      let online = true;
+      try { online = localStorage.getItem('test-offline-network') !== 'true'; } catch { /* Opaque blank target. */ }
+      window.__testOnline = online;
+      Object.defineProperty(navigator, 'onLine', { get: () => window.__testOnline });
       const prefix = signedIn ? `roamly-cache:user:${encodeURIComponent(user.id + ':' + user.generation)}:` : 'roamly-cache:guest:';
       if (localStorage.getItem(prefix + 'roamly-maps')) return;
       if (signedIn) localStorage.setItem('roamly-last-account', JSON.stringify(user));
@@ -57,12 +64,14 @@ for (const { mobile, signedIn } of [{ mobile: false }, { mobile: true }, { mobil
     });
     assert.equal(shell.includes('Lugar privado de teste'), false); assert.equal(shell.includes('Nota privada inicial'), false);
     assert.equal(shell.includes(user.email), false);
+    await page.evaluate(() => localStorage.setItem('test-offline-network', 'true'));
     await page.close();
     offline = true;
     await context.setOffline(true);
     page = await context.newPage();
     await page.goto(base);
     await openList();
+    assert.equal(await page.evaluate(() => navigator.onLine), false);
     assert.match(await page.locator('.place-row:visible').first().innerText(), /Lugar privado de teste/);
     assert.match(await page.locator('.row-copy em:visible').first().innerText(), /Horário não confirmado/);
     await page.locator('.place-row:visible').first().click();
@@ -71,18 +80,22 @@ for (const { mobile, signedIn } of [{ mobile: false }, { mobile: true }, { mobil
     await page.locator('.note-field input').blur();
     if (signedIn) await page.waitForFunction(() => Object.keys(localStorage).some((key) => key.includes('roamly-pending:')));
     await page.close();
-    page = await context.newPage(); await page.goto(base);
+    page = await context.newPage();
+    await page.goto(base);
     await openList();
+    assert.equal(await page.evaluate(() => navigator.onLine), false, 'cold reopened document reports offline');
     assert.match(await page.locator('.row-copy em:visible').first().innerText(), /Horário não confirmado/);
     await page.locator('.place-row:visible').first().click();
     if (mobile) await page.locator('.bottom-nav').getByRole('button', { name: 'Mapa', exact: true }).click();
     assert.equal(await page.locator('.note-field input').inputValue(), 'Editada em abertura offline');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     offline = false; const reads = configReads;
+    const configRecovered = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/auth/config' && response.ok(), { timeout: 10_000 });
     await context.setOffline(false);
+    await page.evaluate(() => { localStorage.removeItem('test-offline-network'); window.__testOnline = true; dispatchEvent(new Event('online')); });
     await page.waitForFunction(() => navigator.onLine);
     // Config lost at cold start must recover without requiring a reload.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await configRecovered;
     assert.ok(configReads > reads);
     if (signedIn) { await page.locator('.sync-pill.synced').first().waitFor({ state: 'attached' }); assert.equal(data.places[0].note, 'Editada em abertura offline'); }
     await page.reload();
