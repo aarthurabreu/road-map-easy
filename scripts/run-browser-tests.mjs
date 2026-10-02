@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 // Start only a loopback test server; never point the default run at production.
 const externalUrl = process.env.ROAMLY_TEST_BASE_URL;
 const port = process.env.ROAMLY_TEST_PORT || '4173';
+const production = process.argv.includes('--production');
 const baseUrl = externalUrl || `http://127.0.0.1:${port}`;
 let server;
 let logs = '';
@@ -13,7 +14,7 @@ try {
   if (!externalUrl) {
     try { await fetch(baseUrl, { signal: AbortSignal.timeout(1000) }); throw new Error(`Port ${port} is already occupied. Choose ROAMLY_TEST_PORT or supply ROAMLY_TEST_BASE_URL.`); }
     catch (error) { if (error.message.includes('already occupied')) throw error; }
-    server = spawn(process.execPath, ['node_modules/vinext/dist/cli.js', 'dev', '--hostname', '127.0.0.1', '--port', port], {
+    server = spawn(process.execPath, ['node_modules/vinext/dist/cli.js', production ? 'start' : 'dev', '--hostname', '127.0.0.1', '--port', port], {
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32',
       env: { ...process.env, NO_COLOR: '1' },
     });
@@ -28,9 +29,9 @@ try {
     }
     if (!ready) throw new Error('Test server did not become ready.\n' + logs);
   }
-  const files = (await readdir('tests/browser')).filter((name) => name.endsWith('.test.mjs')).map((name) => `tests/browser/${name}`);
+  const files = (await readdir('tests/browser')).filter((name) => name.endsWith('.test.mjs') && (production ? name === 'offline-shell.test.mjs' : name !== 'offline-shell.test.mjs')).map((name) => `tests/browser/${name}`);
   const tests = spawn(process.execPath, ['--test', '--test-concurrency=1', ...files], {
-    windowsHide: true, stdio: 'inherit', env: { ...process.env, ROAMLY_TEST_BASE_URL: baseUrl },
+    windowsHide: true, stdio: 'inherit', env: { ...process.env, ROAMLY_TEST_BASE_URL: baseUrl, ...(production ? { ROAMLY_TEST_OFFLINE_REQUIRED: '1' } : {}) },
   });
   code = await new Promise((resolve, reject) => { tests.once('error', reject); tests.once('exit', (value) => resolve(value ?? 1)); });
   if (code) process.stderr.write(logs);

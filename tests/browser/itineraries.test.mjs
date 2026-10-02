@@ -37,6 +37,15 @@ async function run(t, options, action) {
     localStorage.setItem(prefix + 'roamly-current-map', data.currentMap);
     localStorage.setItem(prefix + 'roamly-place-refs', JSON.stringify(data.places));
   }, state.data);
+  if (options.mockGps) await context.addInitScript(() => {
+    const now = Date.now; window.__gpsNow = now(); Date.now = () => window.__gpsNow;
+    window.__gpsReads = 0; window.__gpsCoords = { latitude: -27.59, longitude: -48.55 };
+    Object.defineProperty(navigator, 'geolocation', { value: {
+      getCurrentPosition(success) { window.__gpsReads++; success({ coords: window.__gpsCoords, timestamp: Date.now() }); },
+      watchPosition(success, failure) { window.__gpsSuccess = success; window.__gpsFailure = failure; return 1; },
+      clearWatch() {},
+    } });
+  });
   if (options.mapsReady) await context.addInitScript((data) => {
     window.__placesRequests = 0; window.__autocompleteCalls = 0;
     class FakeMap {
@@ -341,4 +350,24 @@ test('mobile GPS distances sort nearest first and no viewport overflow is introd
   assert.match(await page.locator('.mobile-list .place-row').first().innerText(), /Zulu perto/); assert.match(await page.locator('.mobile-list .row-distance').first().innerText(), /\d+ m/);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await mkdir('test-results', { recursive: true }); await page.screenshot({ path: 'test-results/mobile-photos-distance.png', fullPage: true });
+}));
+
+test('GPS expiry and watch errors clear distances; centralize always requests a fresh fix', { timeout: 60_000 }, async (t) => run(t, { mobile: true, mapsReady: true, mockGps: true }, async (page) => {
+  await home(page); await page.locator('.bottom-nav').getByRole('button', { name: 'Lista', exact: true }).click();
+  await page.getByRole('button', { name: 'Ativar distância e ordenar', exact: true }).click();
+  await page.getByRole('dialog').locator('.privacy-primary').click();
+  await page.locator('.distance-sort-state.ready').waitFor();
+  await page.waitForFunction(() => typeof window.__gpsFailure === 'function');
+  assert.equal(await page.evaluate(() => window.__gpsReads), 1);
+  await page.evaluate(() => { window.__gpsNow += 61_000; document.dispatchEvent(new Event('visibilitychange')); });
+  await page.locator('.distance-sort-state.ready').waitFor({ state: 'detached' });
+  assert.equal((await page.locator('.mobile-list .row-distance').innerText()).trim(), 'Distância indisponível');
+  await page.getByRole('button', { name: 'Ativar distância e ordenar', exact: true }).click();
+  await page.locator('.distance-sort-state.ready').waitFor();
+  assert.equal(await page.evaluate(() => window.__gpsReads), 2);
+  await page.evaluate(() => window.__gpsFailure({ code: 2 }));
+  await page.locator('.distance-sort-state.ready').waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: 'Ativar distância e ordenar', exact: true }).click();
+  await page.locator('.distance-sort-state.ready').waitFor();
+  assert.equal(await page.evaluate(() => window.__gpsReads), 3);
 }));

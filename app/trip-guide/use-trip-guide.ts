@@ -16,7 +16,8 @@ import { sameValue, type SyncConflict } from '../itinerary-sync';
 import { cachedAccount, offlineAccountKey } from '../offline-account';
 import { browserStorage } from '../browser-storage';
 import { uxCopy } from './ux-copy';
-import { hydratePlaceById, hydratePrediction, haversineMeters, formatDistance, sortableDistance, formatGoogleError, calculateSchedule } from './google-places';
+import { hydratePlaceById, hydratePrediction, haversineMeters, formatDistance, sortableDistance, formatGoogleError, placeAvailability, scheduleIsFresh } from './google-places';
+import { freshLocation, locationLifetimeMs } from './location-state';
 
 export function useTripGuide() {
   const [theme, setTheme] = useState<Theme>('light');
@@ -53,6 +54,7 @@ export function useTripGuide() {
   const [mapsAttempt, setMapsAttempt] = useState(0);
   const [placesAttempt, setPlacesAttempt] = useState(0);
   const [clock, setClock] = useState(() => Date.now());
+  const [networkOnline, setNetworkOnline] = useState(true);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [predictions, setPredictions] = useState<SearchPrediction[]>([]);
   const [isSearchingGoogle, setIsSearchingGoogle] = useState(false);
@@ -83,6 +85,7 @@ export function useTripGuide() {
   const failedPlaceKeysRef = useRef(new Set<string>());
   const locationAllowedRef = useRef(false);
   const locationRequestRef = useRef(0);
+  const locationTimestampRef = useRef(0);
   const googleButtonRef = useRef<HTMLDivElement>(null);
   const cloudLoadedForUserRef = useRef('');
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -110,11 +113,28 @@ export function useTripGuide() {
     setTheme(next);
   }
 
-  const updateUserPosition = useCallback((next: google.maps.LatLngLiteral) => {
+  const updateUserPosition = useCallback((next: google.maps.LatLngLiteral, timestamp = Date.now()) => {
     if (!locationAllowedRef.current) return;
+    locationTimestampRef.current = timestamp;
     // Ignore sub-metre GPS noise; distances and the blue dot remain live as you move.
     setUserPosition((previous) => previous && haversineMeters(previous, next) < 1 ? previous : next);
   }, []);
+
+  const loseLocation = useCallback(() => { locationTimestampRef.current = 0; setUserPosition(null); }, []);
+  useEffect(() => {
+    if (!trackLocation || !navigator.geolocation) return;
+    const watch = navigator.geolocation.watchPosition((position) => {
+      if (!freshLocation(position)) { loseLocation(); return; }
+      updateUserPosition({ lat: position.coords.latitude, lng: position.coords.longitude }, position.timestamp);
+    }, (error) => {
+      loseLocation();
+      if (error.code === 1) { locationAllowedRef.current = false; setLocationAllowed(false); setTrackLocation(false); }
+    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 12000 });
+    const expire = () => { if (locationTimestampRef.current && Date.now() - locationTimestampRef.current > locationLifetimeMs) loseLocation(); };
+    const timer = window.setInterval(expire, 10_000);
+    document.addEventListener('visibilitychange', expire);
+    return () => { navigator.geolocation.clearWatch(watch); window.clearInterval(timer); document.removeEventListener('visibilitychange', expire); };
+  }, [trackLocation, updateUserPosition, loseLocation]);
 
   useEffect(() => {
     const savedLanguage = normalizeLanguage(readBrowserItem('roamly-language'));
@@ -356,6 +376,7 @@ export function useTripGuide() {
 
   useEffect(() => {
     if (apiKey === null) return;
+    if (!networkOnline) { setMapsStatus('offline'); return; }
     if (!apiKey) { setMapsStatus('needs-key'); return; }
     if (window.google?.maps?.Map && window.google.maps.marker?.AdvancedMarkerElement) {
       setMapsStatus('ready');
@@ -370,70 +391,79 @@ export function useTripGuide() {
       if (!cancelled) { setMapsStatus('error'); setMapsError(error.message || 'Não foi possível carregar o Google Maps.'); }
     });
     return () => { cancelled = true; };
-  }, [apiKey, language, mapsAttempt]);
+  }, [apiKey, language, mapsAttempt, networkOnline]);
 
   useEffect(() => {
     if (mapsStatus !== 'ready' || !storageReady || !currentMap) return;
     let cancelled = false;
     const candidates = places.filter((place) => {
       const key = placeKey(place.placeId, place.destination ?? 'Madri');
-      return (place.destination ?? 'Madri') === currentMap && !hydratedPlaceKeysRef.current.has(key) && !failedPlaceKeysRef.current.has(key);
+      return (place.destination ?? 'Madri') === currentMap && (!hydratedPlaceKeysRef.current.has(key) || !scheduleIsFresh(place.openingSchedule, clock)) && !failedPlaceKeysRef.current.has(key);
     });
     Promise.allSettled(candidates.map(async (savedPlace) => {
       const key = placeKey(savedPlace.placeId, savedPlace.destination ?? 'Madri');
       try {
         const hydrated = await hydratePlaceById(savedPlace, userPosition, language);
         if (cancelled) return;
-        hydratedPlaceKeysRef.current.add(key);
-        setPlaces((current) => dedupePlaces(current.map((item) => item.id === savedPlace.id ? { ...hydrated, note: item.note, pinColor: item.pinColor } : item)));
+        return { key, hydrated };
       } catch (error) {
         if (!cancelled) failedPlaceKeysRef.current.add(key);
         throw error;
       }
     })).then((results) => {
       if (cancelled) return;
+      const hydrated = new Map<string, Place>();
+      for (const result of results) if (result.status === 'fulfilled' && result.value) { hydratedPlaceKeysRef.current.add(result.value.key); hydrated.set(result.value.hydrated.id, result.value.hydrated); }
+      if (hydrated.size) setPlaces((current) => dedupePlaces(current.map((item) => hydrated.has(item.id) ? { ...hydrated.get(item.id)!, note: item.note, pinColor: item.pinColor } : item)));
       const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (failure) { const message = formatGoogleError(failure.reason, language); setToast(message); setPlacesError(message); }
     });
     return () => { cancelled = true; };
     // Coalesced provider requests survive cancellation; only a live consumer marks success.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapsStatus, storageReady, currentMap, language, placesAttempt, places]);
+  }, [mapsStatus, storageReady, currentMap, language, placesAttempt, places, clock]);
 
   function refreshPlaces() {
+    hydratedPlaceKeysRef.current.clear();
     failedPlaceKeysRef.current.clear();
     setPlacesError(''); setPlacesAttempt((attempt) => attempt + 1);
   }
   function retryGoogleMaps() { setMapsAttempt((attempt) => attempt + 1); }
 
   useEffect(() => {
+    setNetworkOnline(navigator.onLine);
     const update = () => setClock(Date.now());
     const timer = window.setInterval(update, 60_000);
     document.addEventListener('visibilitychange', update);
-    const online = () => { failedPlaceKeysRef.current.clear(); setPlacesAttempt((attempt) => attempt + 1); };
+    const online = () => {
+      setNetworkOnline(true); failedPlaceKeysRef.current.clear(); setPlacesAttempt((attempt) => attempt + 1);
+      if (!apiKey) void fetch('/api/google-config').then((r) => r.json() as Promise<{ apiKey?: string }>).then((data) => setApiKey(data.apiKey ?? '')).catch(() => undefined);
+      if (!oauthClientId) void fetch('/api/auth/config').then((r) => r.json() as Promise<{ clientId?: string }>).then((data) => setOauthClientId(data.clientId ?? '')).catch(() => undefined);
+    };
+    const offline = () => setNetworkOnline(false);
     window.addEventListener('online', online);
-    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', update); window.removeEventListener('online', online); };
-  }, []);
+    window.addEventListener('offline', offline);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', update); window.removeEventListener('online', online); window.removeEventListener('offline', offline); };
+  }, [apiKey, oauthClientId]);
 
   const visiblePlaces = useMemo(() => {
     const normalized = searchMode === 'saved' ? query.trim().toLocaleLowerCase(locale) : '';
     return places.map((place) => {
-      if (!place.openingSchedule) return place;
-      const schedule = calculateSchedule(place.openingSchedule, language, clock);
+      const schedule = placeAvailability(place, language, clock, networkOnline);
       return { ...place, status: schedule.status, statusLabel: schedule.label, hours: schedule.hours };
     }).filter((place) => {
       const matches = !normalized || `${place.name} ${place.category} ${place.address}`.toLocaleLowerCase(locale).includes(normalized);
       return (place.destination ?? 'Madri') === currentMap && matches && (!onlyOpen || place.status === 'open');
     }).map((place) => userPosition && place.lat != null && place.lng != null
       ? { ...place, distance: formatDistance(haversineMeters(userPosition, { lat: place.lat, lng: place.lng }), language) }
-      : place).sort((a, b) => {
+      : { ...place, distance: '—' }).sort((a, b) => {
       const aDistance = sortableDistance(a, userPosition);
       const bDistance = sortableDistance(b, userPosition);
       if (!Number.isFinite(aDistance) && Number.isFinite(bDistance)) return 1;
       if (Number.isFinite(aDistance) && !Number.isFinite(bDistance)) return -1;
       return aDistance !== bDistance ? aDistance - bDistance : a.name.localeCompare(b.name, locale);
     });
-  }, [places, query, onlyOpen, currentMap, searchMode, userPosition, locale, language, clock]);
+  }, [places, query, onlyOpen, currentMap, searchMode, userPosition, locale, language, clock, networkOnline]);
 
   const todayLabel = useMemo(() => formatDateLabel(new Date(clock), language), [language, clock]);
   const openPlacesCount = visiblePlaces.filter((place) => place.status === 'open').length;
@@ -481,11 +511,12 @@ export function useTripGuide() {
   }, [query, searchMode, mapsStatus, liveMap, userPosition, language, locale]);
 
   useEffect(() => {
-    if (!userPosition) return;
-    setLocationLabel(t.liveLocation);
-  }, [userPosition, t.liveLocation]);
+    setLocationLabel(userPosition ? t.liveLocation : locationAllowedRef.current ? (language === 'es' ? 'Señal de ubicación no disponible' : language === 'en' ? 'Location signal unavailable' : 'Sinal de localização indisponível') : t.yourLocation);
+  }, [userPosition, t.liveLocation, t.yourLocation, language]);
 
-  const selected = visiblePlaces.find((place) => place.id === selectedId) ?? places.find((place) => place.id === selectedId) ?? places[0];
+  const selectedBase = visiblePlaces.find((place) => place.id === selectedId) ?? places.find((place) => place.id === selectedId) ?? places[0];
+  const selectedAvailability = selectedBase && placeAvailability(selectedBase, language, clock, networkOnline);
+  const selected = selectedBase && selectedAvailability ? { ...selectedBase, status: selectedAvailability.status, statusLabel: selectedAvailability.label, hours: selectedAvailability.hours, distance: userPosition ? selectedBase.distance : '—' } : undefined;
 
   function showPlace(placeId: string) {
     setSelectedId(placeId);
@@ -516,13 +547,6 @@ export function useTripGuide() {
 
   function requestMyLocation() {
     if (isLocating) return;
-    if (userPosition && liveMap) {
-      liveMap.panTo(userPosition);
-      liveMap.setZoom(16);
-      setLocationLabel(t.liveLocation);
-      setToast(language === 'es' ? 'Mapa centrado en tu ubicación' : language === 'en' ? 'Map centered on your location' : 'Mapa centralizado na sua localização');
-      return;
-    }
     if (!navigator.geolocation) { setToast(language === 'es' ? 'Ubicación no disponible en este dispositivo' : language === 'en' ? 'Location is not available on this device' : 'Localização não disponível neste dispositivo'); return; }
     const requestId = ++locationRequestRef.current;
     locationAllowedRef.current = true;
@@ -531,8 +555,8 @@ export function useTripGuide() {
     setIsLocating(true);
     setLocationLabel(language === 'es' ? 'Localizando…' : language === 'en' ? 'Locating…' : 'Localizando…');
     navigator.geolocation.getCurrentPosition(
-      (position) => { if (requestId !== locationRequestRef.current || !locationAllowedRef.current) return; const next = { lat: position.coords.latitude, lng: position.coords.longitude }; setUserPosition(next); liveMap?.panTo(next); liveMap?.setZoom(16); setLocationLabel(t.liveLocation); setIsLocating(false); setToast(language === 'es' ? 'Mapa centrado en tu ubicación' : language === 'en' ? 'Map centered on your location' : 'Mapa centralizado na sua localização'); },
-      () => { if (requestId !== locationRequestRef.current) return; setTrackLocation(false); setLocationLabel(language === 'es' ? 'Ubicación no disponible' : language === 'en' ? 'Location unavailable' : 'Localização indisponível'); setIsLocating(false); setToast(language === 'es' ? 'Permite el acceso a la ubicación para centrar el mapa' : language === 'en' ? 'Allow location access to center the map' : 'Permita o acesso à localização para centralizar o mapa'); },
+      (position) => { if (requestId !== locationRequestRef.current || !locationAllowedRef.current) return; if (!freshLocation(position)) { loseLocation(); setIsLocating(false); return; } const next = { lat: position.coords.latitude, lng: position.coords.longitude }; updateUserPosition(next, position.timestamp); liveMap?.panTo(next); liveMap?.setZoom(16); setLocationLabel(t.liveLocation); setIsLocating(false); setToast(language === 'es' ? 'Mapa centrado en tu ubicación' : language === 'en' ? 'Map centered on your location' : 'Mapa centralizado na sua localização'); },
+      () => { if (requestId !== locationRequestRef.current) return; loseLocation(); setTrackLocation(false); setLocationLabel(language === 'es' ? 'Ubicación no disponible' : language === 'en' ? 'Location unavailable' : 'Localização indisponível'); setIsLocating(false); setToast(language === 'es' ? 'Permite el acceso a la ubicación para centrar el mapa' : language === 'en' ? 'Allow location access to center the map' : 'Permita o acesso à localização para centralizar o mapa'); },
       { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 },
     );
   }

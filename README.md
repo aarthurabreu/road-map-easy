@@ -11,6 +11,7 @@ Use Node 24 e pnpm 11.19.0. Instale com `pnpm install --frozen-lockfile`; execut
 - `pnpm lint`: ESLint.
 - `pnpm check`: os três comandos anteriores.
 - `pnpm build`: compilação de produção.
+- `pnpm test:offline`: após o build, testa o service worker de produção e abertura fria sem rede, em desktop e celular.
 - `pnpm exec playwright install chromium`, depois `pnpm test:browser`: testes DOM em navegador desktop/mobile. O script inicia e encerra seu próprio servidor local. No Windows, também é possível definir `ROAMLY_TEST_BROWSER_CHANNEL=chrome` para usar o Chrome instalado.
 
 Para usar um servidor **local de teste** existente, defina `ROAMLY_TEST_BASE_URL`. Para trocar a porta automática, defina `ROAMLY_TEST_PORT` (padrão 4173). Os testes de navegador interceptam APIs e bloqueiam serviços externos: não enviam e-mails nem gastam quota Google. Não são uma validação de entrega do Resend, OAuth real, GPS físico ou instalação no iPhone. Falhas salvam capturas em `test-results/`.
@@ -61,7 +62,9 @@ Alterações independentes são combinadas; edição concorrente da mesma inform
 
 Avisos mostram conexão ausente, fila pendente, erro e conflitos, em português, espanhol e inglês. Falha de armazenamento conserva o input em memória e orienta manter o app aberto ou baixar uma cópia. A exportação inclui alterações pendentes e funciona offline com a cópia deste aparelho, indicando quando a nuvem não pôde ser consultada. Armazenamento de navegador não é garantia de backup: limpar dados, modo privado, limites ou remoção automática podem apagar alterações ainda não enviadas.
 
-A proteção offline se aplica ao app já carregado; não foi adicionado um service worker para garantir a abertura inicial sem internet. Nos testes de recarga offline, as APIs ficam inacessíveis, mas o servidor local continua servindo a interface. A fila também sobrevive até a próxima abertura com conexão. Isso não substitui um teste físico no iPhone.
+Depois de uma primeira abertura online e da instalação bem-sucedida do service worker, o app pode reabrir sem internet com os roteiros que este navegador já guardou. O cache guarda somente uma interface pública anônima, arquivos estáticos versionados, ícones e manifesto. APIs, convites, fotos e mapas do Google não entram nesse cache. Sem rede, horários aparecem como não confirmados; o Google Maps exige conexão. Não há promessa de abrir offline antes dessa primeira instalação, nem de recuperar dados se o navegador limpar o armazenamento.
+
+Cada alteração no código do worker, na interface ou em seus arquivos gera um cache distinto. A versão nova aguarda o fechamento das abas antigas; não há reload forçado sobre edições pendentes. A reconexão recupera configurações públicas e tenta enviar a fila com a sessão verificada pelo servidor. A suíte de produção realmente desliga a rede, fecha a página e abre outra, mas não substitui um teste físico no iPhone.
 
 ## Publicação e recuperação
 
@@ -75,14 +78,18 @@ Após restauração de produção, invalide as sessões restauradas por procedim
 
 `app/place-schema.ts` valida tipos, status, coordenadas, URLs HTTPS e créditos de fotos na entrada de dados. Novos locais inválidos retornam 422 sem alterar revisão, recibos ou convites. Convites não importam registros inválidos. Leituras antigas recuperam metadados opcionais seguros, preservando identidade, notas e cores válidas, e informam que houve recuperação. Place IDs continuam opacos; IDs internos padrão incluem o destino para não misturar notas de mapas diferentes. Dicionários usam apenas propriedades próprias. A leitura do D1 inclui a geração autorizada no próprio SELECT.
 
-Horários modernos e legados compartilham um cálculo para 24h, múltiplos turnos, intervalos, meia-noite e virada da semana. Status é recalculado em memória a cada minuto, sem chamada Google por minuto. Detalhes em andamento são compartilhados, com até quatro solicitações simultâneas e apenas uma retentativa de erro transitório. Quota, permissão e Place ID inválido não são repetidos automaticamente. Falhas de script removem o script inválido e permitem nova tentativa.
+Horários modernos e legados compartilham um cálculo para 24h, múltiplos turnos, intervalos, meia-noite e virada da semana. Fechamento temporário/permanente e abertura futura do estabelecimento prevalecem sobre períodos de funcionamento. Status é recalculado em memória a cada minuto, sem chamada Google por minuto. Dados sem horário vivo, offline, com mais de 30 minutos ou de outro dia local são não confirmados. Dados vencidos podem ser atualizados online; quota, permissão e Place ID inválido não são repetidos automaticamente até uma tentativa explícita ou reconexão. Detalhes em andamento são compartilhados, com até quatro solicitações simultâneas e apenas uma retentativa de erro transitório. Falhas de script removem o script inválido e permitem nova tentativa.
 
 Lista, cartão e convite usam a primeira foto da mesma consulta, exibindo todos os créditos, inclusive nomes sem link. Não há componentes Google de detalhe fazendo consultas extras por miniatura. Fotos Google, seus créditos e horários estruturados ficam em memória e não entram nos novos caches, filas, backups ou salvamentos D1; o Place ID permanece. As regras seguem as [referências oficiais de horários](https://developers.google.com/maps/documentation/javascript/reference/place#OpeningHours) e [fotos](https://developers.google.com/maps/documentation/javascript/place-photos).
 
 A busca possui os modos “No roteiro” e “Google Maps”. A busca local funciona mesmo com o mapa conectado e não chama autocomplete; resultados vazios não são confundidos com roteiro sem locais. Distâncias continuam calculadas ao vivo, com os mais próximos primeiro após permitir localização.
+
+GPS é acompanhado pelo controlador, inclusive na visualização de lista. Erros ou uma posição com mais de 60 segundos removem o marcador azul e as distâncias, em vez de apresentar a última posição como atual. Centralizar solicita uma nova posição com `maximumAge: 0`. Parar o acompanhamento limpa a posição; localização não entra no banco nem nos backups.
 
 Modais usam dialog nativo, Tab/Shift+Tab contidos, Escape e restauração do foco. Confirmações de exclusão explicam conta/aparelhos, próxima sincronização, revogação de convites e permanência de cópias já importadas. Rotas e confirmações mantêm seu local-alvo e fecham se ele for removido remotamente.
 
 Falhas no acesso ao armazenamento não derrubam a página; visitante recebe aviso e download. Com login, leitura totalmente bloqueada permite visualizar/exportar a nuvem e manter edições voláteis, mas suspende escrita e confirmação de filas desconhecidas. Uma fila com entrada corrompida continua bloqueando a sincronização. Exclusão confirmada no servidor não é desfeita por falha na limpeza local, e sinalização entre abas é best-effort.
 
 Testes aprovados não equivalem a uma garantia de ausência de vulnerabilidades. Provedores reais, dados excepcionais do Google e dispositivos físicos ainda precisam de validação após publicação.
+
+Veja [OPERACAO.md](OPERACAO.md) para configurar envio de convites, ensaiar recuperação de banco e executar o teste físico no iPhone. Não trate testes mockados ou cópias exportadas por um único usuário como backup do banco inteiro.

@@ -8,10 +8,11 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "test:browser": "node scripts/run-browser-tests.mjs",
+    "test:offline": "node scripts/run-browser-tests.mjs --production",
     "typecheck": "tsc --noEmit --incremental false",
     "check": "pnpm test && pnpm typecheck && pnpm lint",
     "dev": "vinext dev",
-    "build": "vinext build",
+    "build": "vinext build && node scripts/build-service-worker.mjs",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },

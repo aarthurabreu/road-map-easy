@@ -236,7 +236,7 @@ export function TripGuideView({ controller }: { controller: ReturnType<typeof us
             {visiblePlaces.length === 0 && <div className="panel-empty mobile-empty"><MapPin size={22} /><strong>{noMatches ? ux.noMatches : t.noPlaceItinerary}</strong><span>{noMatches ? ux.clearHint : t.returnMapHint}</span></div>}
           </div>
 
-          {view === 'map' && !detailsDismissed && visiblePlaces.some((place) => place.id === selected.id) && (
+          {view === 'map' && !detailsDismissed && selected && visiblePlaces.some((place) => place.id === selected.id) && (
             <article className="place-card">
               <button className="close-card" onClick={closePlaceDetails} aria-label={t.closeDetails} title={t.closeDetails}><X size={18} /></button>
               <div className="place-photo">

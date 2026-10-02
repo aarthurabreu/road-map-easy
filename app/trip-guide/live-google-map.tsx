@@ -8,7 +8,7 @@ import { localizedStatusLabel } from './google-places';
 import type { Place, Theme } from './types';
 
 export function LiveGoogleMap({
-  places, selectedId, onSelect, onMapPlaceClick, onUserPosition, onMapReady, trackUser, userPosition, language, theme,
+  places, selectedId, onSelect, onMapPlaceClick, onMapReady, userPosition, language, theme,
 }: {
   places: Place[]; selectedId: string; onSelect: (id: string) => void;
   onMapPlaceClick: (placeId: string) => void;
@@ -75,14 +75,6 @@ export function LiveGoogleMap({
       selected: place.id === selectedId,
     })));
   }, [places, selectedId, language, theme]);
-
-  useEffect(() => {
-    if (!trackUser || !navigator.geolocation) return;
-    const watchId = navigator.geolocation.watchPosition((position) => {
-      onUserPosition({ lat: position.coords.latitude, lng: position.coords.longitude });
-    }, () => undefined, { enableHighAccuracy: true, maximumAge: 5000, timeout: 12000 });
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [onUserPosition, trackUser]);
 
   useEffect(() => {
     if (!mapRef.current) return;

@@ -11,12 +11,12 @@ export type Place = {
   pinColor?: string;
   photoAttributions?: { name: string; url: string }[];
   photoSource?: 'google';
-  openingSchedule?: { utcOffsetMinutes: number; periods: { start: number; end: number; alwaysOpen?: boolean }[]; fetchedAt: number };
+  openingSchedule?: { utcOffsetMinutes: number; periods: { start: number; end: number; alwaysOpen?: boolean }[]; fetchedAt: number; businessStatus?: string };
 };
 
 export type StoredPlaceRef = Partial<Place> & Pick<Place, 'id' | 'placeId'> & { destination: string };
 
-export type MapsStatus = 'loading' | 'ready' | 'needs-key' | 'error';
+export type MapsStatus = 'loading' | 'ready' | 'needs-key' | 'error' | 'offline';
 
 export type AuthUser = { id: string; email: string; name: string; picture?: string; generation: string };
 

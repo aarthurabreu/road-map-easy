@@ -31,7 +31,7 @@ export function PlaceRow({ place, active, language, onSelect }: { place: Place; 
           <span className={`row-distance ${place.distance === '—' ? 'pending' : ''}`}><Navigation size={11} />{place.distance === '—' ? t.distancePending : place.distance}</span>
           <em className={place.status}>{localizedStatusLabel(place.statusLabel, language)}</em>
         </span>
-        <span className={`status-dot ${place.status}`} title={place.status === 'open' ? t.openStatus : place.status === 'soon' ? t.soonStatus : t.closedStatus} />
+        <span className={`status-dot ${place.status}`} title={localizedStatusLabel(place.statusLabel, language)} />
       </button>
       <PhotoCredits place={place} language={language} className="row-photo-credit" />
     </div>
@@ -41,6 +41,7 @@ export function PlaceRow({ place, active, language, onSelect }: { place: Place; 
 export function MapsConnection({ status, error, onConnect, onRetry, language }: { status: MapsStatus; error: string; onConnect: (key: string) => void; onRetry: () => void; language: Language }) {
   const [key, setKey] = useState('');
   const t: Copy = translations[language];
+  if (status === 'offline') return <div className="maps-connect-card compact" role="status"><strong>{language === 'es' ? 'Sin conexión' : language === 'en' ? 'Offline' : 'Sem conexão'}</strong><p>{language === 'es' ? 'Consulta tus lugares guardados. El mapa y los horarios se actualizarán al volver a conectarte.' : language === 'en' ? 'View your saved places. The map and hours will update when you reconnect.' : 'Consulte seus locais salvos. O mapa e os horários serão atualizados quando a conexão voltar.'}</p></div>;
   if (status === 'loading') return <div className="maps-connect-card compact"><span className="search-spinner" /><strong>{t.mapsLoading}</strong></div>;
   return (
     <div className="maps-connect-card">

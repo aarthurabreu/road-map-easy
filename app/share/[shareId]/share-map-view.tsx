@@ -9,7 +9,7 @@ import { createMarkerRegistry } from '../../map-markers';
 import { parsePlace } from '../../place-schema';
 import type { Place } from '../../trip-guide/types';
 import { loadGoogleMaps, loadGoogleIdentity } from '../../trip-guide/google-runtime';
-import { hydratePlaceById, calculateSchedule, localizedCategory, localizedStatusLabel, localizedHours, formatGoogleError } from '../../trip-guide/google-places';
+import { hydratePlaceById, placeAvailability, scheduleIsFresh, localizedCategory, localizedStatusLabel, localizedHours, formatGoogleError } from '../../trip-guide/google-places';
 import { PlacePhoto, PhotoCredits } from '../../trip-guide/place-components';
 import { uxCopy } from '../../trip-guide/ux-copy';
 import { useBrowserEnvironment, setBrowserLanguage, setBrowserTheme } from '../../trip-guide/use-browser-environment';
@@ -43,6 +43,8 @@ export function SharedMapView({ shareId }: { shareId: string }) {
   const [placesError, setPlacesError] = useState('');
   const [refreshAttempt, setRefreshAttempt] = useState(0);
   const [clock, setClock] = useState(() => Date.now());
+  const [online, setOnline] = useState(true);
+  const failedDetails = useRef(new Set<string>());
   const [selectedPlaceId, setSelectedPlaceId] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
@@ -101,29 +103,37 @@ export function SharedMapView({ shareId }: { shareId: string }) {
 
   const displayPlaces = useMemo(() => (map?.places ?? []).map((place) => {
     const live = Object.hasOwn(livePlaces, place.id) ? { ...livePlaces[place.id], pinColor: place.pinColor } : place;
-    if (!live.openingSchedule) return live;
-    const schedule = calculateSchedule(live.openingSchedule, language, clock);
+    const schedule = placeAvailability(live, language, clock, online);
     return { ...live, status: schedule.status, statusLabel: schedule.label, hours: schedule.hours };
-  }), [map, livePlaces, language, clock]);
+  }), [map, livePlaces, language, clock, online]);
   const hasLocatedPlace = displayPlaces.some((place) => Number.isFinite(place.lat) && Number.isFinite(place.lng));
   const currentMapSetup = useEffectEvent(() => ({ language, dark, selectedPlaceId, places: displayPlaces }));
 
   useEffect(() => {
+    const update = () => { setOnline(navigator.onLine); setClock(Date.now()); };
+    queueMicrotask(update);
+    const reconnect = () => { failedDetails.current.clear(); setRefreshAttempt((value) => value + 1); update(); };
     const timer = window.setInterval(() => setClock(Date.now()), 60_000);
-    return () => window.clearInterval(timer);
+    window.addEventListener('online', reconnect); window.addEventListener('offline', update); document.addEventListener('visibilitychange', update);
+    return () => { window.clearInterval(timer); window.removeEventListener('online', reconnect); window.removeEventListener('offline', update); document.removeEventListener('visibilitychange', update); };
   }, []);
+  useEffect(() => { failedDetails.current.clear(); queueMicrotask(() => setLivePlaces({})); }, [language, refreshAttempt]);
   useEffect(() => {
-    if (!map || !mapsKey) return;
+    if (!map || !mapsKey || !online) return;
+    const candidates = map.places.filter((place) => !scheduleIsFresh(livePlaces[place.id]?.openingSchedule, clock) && !failedDetails.current.has(place.id));
+    if (!candidates.length) return;
     let cancelled = false;
     void loadGoogleMaps(mapsKey, language).then(async () => {
-      const results = await Promise.allSettled(map.places.map((place) => hydratePlaceById(place, null, language)));
+      const results = await Promise.allSettled(candidates.map(async (place) => {
+        try { return await hydratePlaceById(place, null, language); } catch (error) { if (!cancelled) failedDetails.current.add(place.id); throw error; }
+      }));
       if (cancelled) return;
-      setLivePlaces(Object.fromEntries(results.flatMap((result) => result.status === 'fulfilled' ? [[result.value.id, result.value]] : [])));
+      setLivePlaces((previous) => ({ ...previous, ...Object.fromEntries(results.flatMap((result) => result.status === 'fulfilled' ? [[result.value.id, result.value]] : [])) }));
       const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
       setPlacesError(failure ? formatGoogleError(failure.reason, language) : '');
-    }).catch((error) => { if (!cancelled) setPlacesError(formatGoogleError(error, language)); });
+    }).catch((error) => { if (!cancelled) { for (const place of candidates) failedDetails.current.add(place.id); setPlacesError(formatGoogleError(error, language)); } });
     return () => { cancelled = true; };
-  }, [map, mapsKey, language, refreshAttempt]);
+  }, [map, mapsKey, language, refreshAttempt, clock, online, livePlaces]);
 
   useEffect(() => {
     const container = mapContainer.current;

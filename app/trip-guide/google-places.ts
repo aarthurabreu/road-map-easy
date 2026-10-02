@@ -3,7 +3,7 @@ import type { Place, PlaceStatus, SearchPrediction } from './types';
 
 export const placeFields = [
   'id', 'displayName', 'formattedAddress', 'location', 'primaryType', 'primaryTypeDisplayName',
-  'rating', 'photos', 'currentOpeningHours', 'regularOpeningHours', 'utcOffsetMinutes', 'googleMapsURI',
+  'rating', 'photos', 'currentOpeningHours', 'regularOpeningHours', 'utcOffsetMinutes', 'googleMapsURI', 'businessStatus',
 ];
 
 const inFlight = new Map<string, Promise<google.maps.places.Place>>();
@@ -75,7 +75,8 @@ export function fetchLegacyPlaceDetails(placeId: string) {
 
 export function toSavedLegacyPlace(result: google.maps.places.PlaceResult, destination: string, note: string, id: string, userPosition: google.maps.LatLngLiteral | null, language: Language): Place {
   const location = result.geometry?.location?.toJSON();
-  const schedule = getLegacySchedule(result.opening_hours, result.utc_offset_minutes ?? 0, language);
+  const openingSchedule = { ...legacySchedule(result.opening_hours, result.utc_offset_minutes ?? 0), businessStatus: result.business_status };
+  const schedule = calculateSchedule(openingSchedule, language);
   const photo = result.photos?.[0];
   const attribution = parseLegacyAttribution(photo?.html_attributions?.[0]);
   return {
@@ -86,13 +87,25 @@ export function toSavedLegacyPlace(result: google.maps.places.PlaceResult, desti
     distance: location && userPosition ? formatDistance(haversineMeters(userPosition, location), language) : '—',
     photo: photo?.getUrl({ maxWidth: 1200, maxHeight: 800 }) || '', photoAttribution: attribution,
     photoAttributions: (photo?.html_attributions ?? []).map(parseLegacyAttribution).filter((author): author is NonNullable<typeof author> => Boolean(author)), photoSource: 'google',
-    openingSchedule: legacySchedule(result.opening_hours, result.utc_offset_minutes ?? 0),
+    openingSchedule,
     x: 50, y: 50, rating: result.rating?.toLocaleString(languageLocales[language], { minimumFractionDigits: 1, maximumFractionDigits: 1 }) || '—',
     lat: location?.lat, lng: location?.lng, googleMapsURI: result.url,
   };
 }
 
 type Schedule = NonNullable<Place['openingSchedule']>;
+export const detailsLifetimeMs = 30 * 60_000;
+export function scheduleIsFresh(schedule: Schedule | undefined, now = Date.now()) {
+  if (!schedule || !Number.isFinite(schedule.fetchedAt) || schedule.fetchedAt > now + 5000 || now - schedule.fetchedAt >= detailsLifetimeMs) return false;
+  const localDate = (time: number) => new Date(time + schedule.utcOffsetMinutes * 60_000).toISOString().slice(0, 10);
+  return localDate(now) === localDate(schedule.fetchedAt);
+}
+export function placeAvailability(place: Place, language: Language, now = Date.now(), online = true) {
+  if (!online || !scheduleIsFresh(place.openingSchedule, now)) {
+    return { status: 'closed' as const, label: language === 'es' ? 'Horario no confirmado' : language === 'en' ? 'Hours not confirmed' : 'Horário não confirmado', hours: unavailableSchedule(language).hours };
+  }
+  return calculateSchedule(place.openingSchedule!, language, now);
+}
 type SchedulePoint = { day: number; hour: number; minute: number };
 function normalizedSchedule(periods: { open: SchedulePoint; close?: SchedulePoint | null }[], utcOffsetMinutes: number): Schedule {
   return { utcOffsetMinutes, fetchedAt: Date.now(), periods: periods.map(({ open, close }) => {
@@ -105,6 +118,14 @@ function normalizedSchedule(periods: { open: SchedulePoint; close?: SchedulePoin
 }
 
 export function calculateSchedule(schedule: Schedule, language: Language, now = Date.now()): { status: PlaceStatus; label: string; hours: string } {
+  if (['CLOSED_PERMANENTLY', 'CLOSED_TEMPORARILY', 'FUTURE_OPENING'].includes(schedule.businessStatus ?? '')) {
+    const labels = schedule.businessStatus === 'CLOSED_PERMANENTLY'
+      ? { pt: 'Fechado permanentemente', es: 'Cerrado permanentemente', en: 'Permanently closed' }
+      : schedule.businessStatus === 'CLOSED_TEMPORARILY'
+        ? { pt: 'Fechado temporariamente', es: 'Cerrado temporalmente', en: 'Temporarily closed' }
+        : { pt: 'Ainda não inaugurado', es: 'Aún no inaugurado', en: 'Not open yet' };
+    return { status: 'closed', label: labels[language], hours: unavailableSchedule(language).hours };
+  }
   if (!schedule.periods.length) return unavailableSchedule(language);
   if (schedule.periods.some((period) => period.alwaysOpen)) return { status: 'open', label: openNow(language), hours: '24h' };
   const local = new Date(now + schedule.utcOffsetMinutes * 60_000);
@@ -224,7 +245,8 @@ export function parseLegacyAttribution(html?: string): { name: string; url: stri
 export function toSavedPlace(livePlace: google.maps.places.Place, destination: string, note: string, id: string, userPosition: google.maps.LatLngLiteral | null, language: Language): Place {
   const location = livePlace.location?.toJSON();
   const hours = livePlace.currentOpeningHours ?? livePlace.regularOpeningHours;
-  const schedule = getLiveSchedule(hours, livePlace.utcOffsetMinutes ?? 0, language);
+  const openingSchedule = { ...liveSchedule(hours, livePlace.utcOffsetMinutes ?? 0), businessStatus: livePlace.businessStatus ?? undefined };
+  const schedule = calculateSchedule(openingSchedule, language);
   const photo = livePlace.photos?.[0];
   const attribution = photo?.authorAttributions?.[0];
   return {
@@ -237,7 +259,7 @@ export function toSavedPlace(livePlace: google.maps.places.Place, destination: s
     photo: photo?.getURI({ maxWidth: 1200, maxHeight: 800 }) || '',
     photoAttribution: attribution ? { name: attribution.displayName, url: attribution.uri ?? '' } : undefined,
     photoAttributions: (photo?.authorAttributions ?? []).map((author) => ({ name: author.displayName, url: author.uri ?? '' })), photoSource: 'google',
-    openingSchedule: liveSchedule(hours, livePlace.utcOffsetMinutes ?? 0),
+    openingSchedule,
     x: 50, y: 50, rating: livePlace.rating?.toLocaleString(languageLocales[language], { minimumFractionDigits: 1, maximumFractionDigits: 1 }) || '—',
     lat: location?.lat, lng: location?.lng, googleMapsURI: livePlace.googleMapsURI ?? undefined,
   };

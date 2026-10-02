@@ -87,7 +87,7 @@ test('selection, pin color, translation and coordinates update in place; removal
   assert.equal(state.detached, 3);
 });
 
-test('live component: GPS/notes/language do not reset camera; theme retains viewport and one GPS watch', () => {
+test('live component: GPS/notes/language do not reset camera; theme retains viewport and GPS is controller-owned', () => {
   const { state, context, compile } = runtime();
   const refs = [], effects = [];
   let cursor = 0, queue = [];
@@ -115,12 +115,12 @@ test('live component: GPS/notes/language do not reset camera; theme retains view
   };
   render(props);
   assert.equal(state.maps.length, 1);
-  assert.equal(state.watches.size, 1);
+  assert.equal(state.watches.size, 0);
   assert.equal(state.markers.length, 2); // Saved place + blue location dot.
   readyMap.center = { lat: -27.7, lng: -48.8 };
   readyMap.zoom = 17;
   for (let step = 0; step < 30; step++) {
-    state.watches.values().next().value({ coords: { latitude: -27.52 + step / 1000, longitude: -48.51 } });
+    location = { lat: -27.52 + step / 1000, lng: -48.51 };
     render({ ...props, places: props.places.map((place) => ({ ...place, note: `${step}` })), userPosition: location, onSelect: (id) => { selected = `latest:${id}`; } });
   }
   state.markers[0].events.get('gmp-click')();
@@ -131,13 +131,13 @@ test('live component: GPS/notes/language do not reset camera; theme retains view
   assert.equal(state.pans, 0);
   render({ ...props, language: 'en' });
   assert.equal(state.maps.length, 1);
-  assert.equal(state.watches.size, 1);
+  assert.equal(state.watches.size, 0);
   render({ ...props, theme: 'dark', userPosition: location });
   assert.equal(state.maps.length, 2);
   assert.equal(readyMap.options.colorScheme, 'DARK');
   assert.equal(readyMap.center.lat, -27.7);
   assert.equal(readyMap.zoom, 17);
-  assert.equal(state.watches.size, 1);
+  assert.equal(state.watches.size, 0);
   assert.equal(state.pans, 0);
   effects.forEach((effect) => effect?.cleanup?.());
   assert.equal(state.watches.size, 0);
